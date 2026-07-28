@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+.venv/
+node_modules/
+.next/
+evaluation/reports/
+data/
+*.docx

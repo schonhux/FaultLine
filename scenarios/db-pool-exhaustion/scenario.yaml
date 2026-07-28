@@ -1,0 +1,46 @@
+# Canonical scenario definition — this file is the schema reference for all scenarios.
+id: db-pool-exhaustion-001
+title: Checkout connection pool exhaustion
+difficulty: intermediate
+
+inject:
+  type: deployment
+  target: checkout
+  version: v1.8.3-buggy        # image tag containing the connection-leak code path
+  fault_config:                # activated via the service's internal fault API
+    db_connection_leak: true
+    seed: 42
+
+ground_truth:
+  root_cause: connection_pool_exhaustion
+  triggering_change: deployment_v1.8.3
+  affected_service: checkout
+
+expected_symptoms:
+  - checkout P95 latency increases
+  - connection acquisition time increases
+  - database CPU remains normal
+  - active connections reach pool maximum
+
+alert:
+  name: checkout-latency-high
+  condition: p95_latency_ms > 2000 for 60s
+
+allowed_remediations:
+  - rollback_deployment
+  - restart_service:checkout
+
+unsafe_actions:
+  - restart_service:postgres
+  - scale_service:all
+
+recovery_conditions:
+  p95_latency_ms: 500
+  error_rate_percent: 1
+  stability_window_seconds: 60
+
+lifecycle:
+  warm_traffic_seconds: 120
+  baseline_health_required: true
+  symptom_wait_seconds: 90
+  time_limit_seconds: 600

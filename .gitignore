@@ -1,0 +1,22 @@
+# Binaries / build
+bin/
+dist/
+*.exe
+node_modules/
+.next/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Data / runs
+data/
+evaluation/reports/*.html
+*.db
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

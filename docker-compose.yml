@@ -1,0 +1,121 @@
+name: faultline
+
+services:
+  # ── Dependencies ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shopgrid
+      POSTGRES_PASSWORD: shopgrid
+      POSTGRES_DB: shopgrid
+    ports: ["5432:5432"]
+    volumes:
+      - ./infrastructure/docker/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopgrid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redpanda:
+    image: redpandadata/redpanda:v24.1.7
+    command:
+      - redpanda start --overprovisioned --smp 1 --memory 512M
+        --kafka-addr PLAINTEXT://0.0.0.0:9092
+        --advertise-kafka-addr PLAINTEXT://redpanda:9092
+    entrypoint: ["/bin/sh", "-c"]
+    ports: ["9092:9092"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports: ["8123:8123", "9000:9000"]
+    volumes:
+      - ./observability/clickhouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ── ShopGrid services (built in platform/) ───────────────────
+  gateway:
+    build: { context: ., dockerfile: platform/gateway/Dockerfile }
+    environment: &svc-env
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      POSTGRES_DSN: postgres://shopgrid:shopgrid@postgres:5432/shopgrid?sslmode=disable
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: redpanda:9092
+      CHECKOUT_URL: http://checkout:8081
+      CATALOG_URL: http://catalog:8082
+      RUST_LOG: info
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      checkout: { condition: service_started }
+      catalog: { condition: service_started }
+      otel-collector: { condition: service_started }
+
+  checkout:
+    build: { context: ., dockerfile: platform/checkout/Dockerfile }
+    environment: *svc-env
+    ports: ["8081:8081"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+      catalog: { condition: service_started }
+      otel-collector: { condition: service_started }
+
+  catalog:
+    build: { context: ., dockerfile: platform/catalog/Dockerfile }
+    environment: *svc-env
+    ports: ["8082:8082"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+
+  notifications:
+    build: { context: ., dockerfile: platform/notifications/Dockerfile }
+    environment: *svc-env
+    ports: ["8083:8083"]
+    depends_on:
+      redpanda: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+
+  trafficgen:
+    build: { context: ., dockerfile: platform/trafficgen/Dockerfile }
+    environment:
+      TARGET_URL: http://gateway:8080
+      TRAFFIC_SEED: 42
+      TRAFFIC_RPS: 4
+      RUST_LOG: info
+    depends_on: [gateway]
+
+  # ── Telemetry stack ──────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otel/config.yaml:ro
+    ports: ["4317:4317", "4318:4318"]
+    depends_on:
+      clickhouse: { condition: service_healthy }
