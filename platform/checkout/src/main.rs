@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use shared::http::{metrics_middleware, should_inject_error, Client, HttpMetrics};
 use shared::FaultState;
 use std::time::{Duration, Instant};
+use tracing::Instrument;
 
 const POOL_MAX: u32 = 20;
 
@@ -179,41 +180,55 @@ async fn create_order(
         }
     }
 
-    // 3. Transaction: insert order, decrement stock.
-    let start = Instant::now();
-    let acquired = app.db.begin().await;
-    app.acquire_ms
-        .record(start.elapsed().as_secs_f64() * 1000.0, &[]);
+    // 3. Transaction: insert order, decrement stock. Spanned explicitly so the
+    // pool-exhaustion signature (wait before SQL executes) is visible in traces,
+    // not just in the db.pool.acquire.duration_ms histogram.
+    let tx_span = tracing::info_span!("db.transaction", "db.system" = "postgresql");
+    let order_id_for_tx = order_id.clone();
+    let product_for_tx = &product;
+    let req_for_tx = &req;
+    let db = &app.db;
+    let acquire_ms = &app.acquire_ms;
+    let tx_result: Result<(), StatusCode> = async {
+        let start = Instant::now();
+        let acquired = db.begin().await;
+        acquire_ms.record(start.elapsed().as_secs_f64() * 1000.0, &[]);
 
-    let mut tx = acquired.map_err(|e| {
-        tracing::error!(
-            error = %e,
-            pool_active = app.db.size(),
-            pool_max = POOL_MAX,
-            "database acquisition timeout"
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        let mut tx = acquired.map_err(|e| {
+            tracing::error!(
+                error = %e,
+                pool_active = db.size(),
+                pool_max = POOL_MAX,
+                "database acquisition timeout"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-    sqlx::query("INSERT INTO orders (id, product_id, quantity, total_cents, status) VALUES ($1, $2, $3, $4, 'confirmed')")
-        .bind(&order_id)
-        .bind(req.product_id)
-        .bind(req.quantity)
-        .bind(product.price_cents * req.quantity)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| { tracing::error!(error = %e, "order insert failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
+        sqlx::query("INSERT INTO orders (id, product_id, quantity, total_cents, status) VALUES ($1, $2, $3, $4, 'confirmed')")
+            .bind(&order_id_for_tx)
+            .bind(req_for_tx.product_id)
+            .bind(req_for_tx.quantity)
+            .bind(product_for_tx.price_cents * req_for_tx.quantity)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| { tracing::error!(error = %e, "order insert failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
 
-    sqlx::query("UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1")
-        .bind(req.quantity)
-        .bind(product.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| { tracing::error!(error = %e, "stock update failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
+        sqlx::query("UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1")
+            .bind(req_for_tx.quantity)
+            .bind(product_for_tx.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| { tracing::error!(error = %e, "stock update failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
 
-    tx.commit()
-        .await
-        .map_err(|e| { tracing::error!(error = %e, "commit failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
+        tx.commit()
+            .await
+            .map_err(|e| { tracing::error!(error = %e, "commit failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
+
+        Ok(())
+    }
+    .instrument(tx_span)
+    .await;
+    tx_result?;
 
     // 4. Publish orders.created event for the notification worker.
     let payload = serde_json::json!({
@@ -223,17 +238,22 @@ async fn create_order(
         "ts": chrono::Utc::now().to_rfc3339(),
     })
     .to_string();
-    if let Err((e, _)) = app
-        .kafka
-        .send(
-            FutureRecord::to("orders.created").key(&order_id).payload(&payload),
-            Duration::from_secs(2),
-        )
-        .await
-    {
-        // Order is committed; notification delay is acceptable. Log, don't fail.
-        tracing::error!(error = %e, order_id, "failed to publish orders.created");
+    let kafka_span = tracing::info_span!("kafka.publish", "messaging.system" = "kafka", "messaging.destination" = "orders.created");
+    async {
+        if let Err((e, _)) = app
+            .kafka
+            .send(
+                FutureRecord::to("orders.created").key(&order_id).payload(&payload),
+                Duration::from_secs(2),
+            )
+            .await
+        {
+            // Order is committed; notification delay is acceptable. Log, don't fail.
+            tracing::error!(error = %e, order_id, "failed to publish orders.created");
+        }
     }
+    .instrument(kafka_span)
+    .await;
 
     let attrs = [KeyValue::new("status", "confirmed")];
     global::meter("checkout")
