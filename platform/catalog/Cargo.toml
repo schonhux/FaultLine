@@ -1,0 +1,17 @@
+[package]
+name = "catalog"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+shared = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+redis = { workspace = true }
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "platform/shared",
+    "platform/gateway",
+    "platform/checkout",
+    "platform/catalog",
+    "platform/notifications",
+    "platform/trafficgen",
+]
+
+[workspace.package]
+version = "1.8.2"
+edition = "2021"
+
+[workspace.dependencies]
+# Runtime + web
+tokio = { version = "1.40", features = ["full"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization / errors / misc
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+# Data
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+rdkafka = { version = "0.36", features = ["cmake-build", "tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Telemetry (versions aligned: otel 0.27 family, tracing-opentelemetry 0.28)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "logs", "metrics", "trace"] }
+opentelemetry-semantic-conventions = "0.27"
+opentelemetry-appender-tracing = "0.27"
+tracing-opentelemetry = "0.28"
+
+shared = { path = "platform/shared" }
+
+[profile.release]
+lto = "thin"
