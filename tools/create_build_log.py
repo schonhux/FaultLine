@@ -199,7 +199,7 @@ def build():
             ("Project", "FaultLine"),
             ("Repository", "schonhux/FaultLine-"),
             ("Build Method", "Layered delivery: Layer 0 through Layer 6, each with a hard exit criterion"),
-            ("Current Layer", "Layer 1 - Manual Incident Verification (Layer 0 closed)"),
+            ("Current Layer", "Layer 2 - Scenario Runner (Layers 0-1 closed)"),
             ("Preset", "compact_reference_guide"),
         ],
         [1800, 7560],
@@ -637,6 +637,61 @@ def build():
         "Awaiting: the user running each scenario against the live stack and reporting the signature query results back for confirmation before Layer 1 is marked closed.",
     )
 
+    doc.add_heading(f"Entry - {date.today().isoformat()} - Layer 1 Verification Attempt 1 (fault API content-type)", level=1)
+    add_para(
+        doc,
+        "First live scenario attempt (db-pool-exhaustion) against the fault API returned 'Expected request with Content-Type: application/json' from curl, and the followup ClickHouse gauge query showed db.pool.active/idle still at normal baseline levels (0-1, not pinned near the pool max of 20) -- the fault was never actually applied, even though the curl command itself exited without an obvious error.",
+    )
+    add_para(
+        doc,
+        "Root cause: axum's Json extractor (used by shared::fault::set_fault) requires the Content-Type: application/json header. curl's -d flag alone sends application/x-www-form-urlencoded by default, so every activation command in the original layer1-manual-verification.md silently failed server-side.",
+    )
+    add_para(
+        doc,
+        "Fix: added -H 'Content-Type: application/json' to all 6 activation commands in docs/layer1-manual-verification.md, and added a mandatory GET /internal/fault confirmation step immediately after every POST so a silent failure like this is caught in seconds rather than after a full wait-and-query cycle.",
+    )
+
+    doc.add_heading(f"Entry - {date.today().isoformat()} - Layer 1 Verification: kafka-lag bug found and fixed", level=1)
+    add_para(
+        doc,
+        "5 of 6 scenarios (db-pool-exhaustion, redis-latency, bad-deployment, retry-storm, expired-credentials) were confirmed with clean, correct telemetry signatures on live re-runs. kafka-lag was not: queue.consumer_lag stayed frozen at exactly -5426 across a 10-minute window with pause_consumer confirmed true the whole time via the HTTP fault API.",
+    )
+    add_para(
+        doc,
+        "docker compose logs notifications showed the real cause: zero occurrences of either 'order confirmation simulated' or 'notifications consumer paused by fault injection' for over an hour, across multiple fault activations. The pause-check branch was never being re-entered at all. Root cause: run_consumer's loop awaited consumer.recv() with no timeout; if that future never resolves (topic momentarily idle, or any client-level stall), the loop never returns to the top to re-check pause_consumer, making the fault silently unobservable regardless of whether it was correctly activated.",
+    )
+    add_para(
+        doc,
+        "Fix: wrapped consumer.recv() in tokio::time::timeout(Duration::from_secs(2), ...) in platform/notifications/src/main.rs. On timeout the loop simply continues, guaranteeing the pause_consumer check is revisited at least every 2 seconds regardless of message arrival. This is a genuine correctness fix to the fault's observability, not a test methodology change -- requires rebuilding and restarting the notifications container before re-testing kafka-lag.",
+    )
+
+    doc.add_heading(f"Entry - {date.today().isoformat()} - Layer 1 Closed", level=1)
+    add_para(
+        doc,
+        "After fixing the notifications consumer timeout bug and rebuilding just that service, all 6 cataloged fault scenarios were verified live with clean, distinct telemetry signatures and confirmed resets:",
+    )
+    add_table(
+        doc,
+        ["Scenario", "Signature confirmed"],
+        [
+            ("db-pool-exhaustion", "db.pool.active pinned at 20/20 (pool max), db.pool.idle at 0, while db_connection_leak active."),
+            ("redis-latency", "catalog http.request average duration jumped from a few ms baseline to ~1070ms with redis_latency_ms=800 active."),
+            ("bad-deployment", "catalog error rate jumped to 6/10 = 60% in the minute after the deployment_events marker + inject_error_rate=0.6, versus 0% before."),
+            ("kafka-lag", "queue.consumer_lag climbed steadily and cleanly (0, 3, 8, 13, 18, 23, 28, 33, 38 -- +5 every 5s, matching the +1/s design) once the consumer's unbounded recv() was fixed with a 2s timeout."),
+            ("retry-storm", "checkout's dependency.call span count jumped to 5 per parent http.request span (vs. 1 at baseline) with aggressive_retries + catalog inject_error_rate active together."),
+            ("expired-credentials", "catalog logged a clean, continuous stream of 'invalid internal token' 401 warnings for the duration auth_expired was active."),
+        ],
+        [2400, 6960],
+    )
+    add_para(
+        doc,
+        "Process lesson carried forward into Layer 2: POST /internal/fault replaces the entire config rather than merging fields, so a fault left active on an untouched service silently persists and contaminates later scenarios -- this happened once here (checkout's db_connection_leak survived through 3 subsequent scenario attempts before being incidentally cleared). The Layer 2 scenario runner's lifecycle (reset -> load known-good -> warm -> baseline-health gate -> inject -> symptom gate -> session window -> verify -> score-ready -> reset) already designs this out by making reset a mandatory, automatic step on both ends of every run -- this incident is direct field evidence for why that lifecycle shape was the right call, not just a nice-to-have.",
+    )
+    add_para(
+        doc,
+        "Layer 1 is CLOSED. All 6 scenarios are confirmed diagnosable from telemetry alone, which is the whole point of this layer existing before any agent or scenario runner is built on top of it.",
+    )
+
     doc.add_section(WD_SECTION.NEW_PAGE)
     doc.add_heading("Layer Exit Log", level=1)
     add_para(
@@ -648,7 +703,7 @@ def build():
         ["Layer", "Exit Status", "Evidence"],
         [
             ("0", "Closed", "7 root causes found and fixed via live log evidence, not guesses: (1-2) Rust MSRV mismatches -> rust:1-bookworm. (3) redpanda entrypoint override -> removed, discrete command list. (4) otel-collector crash loop, no restart policy -> restart: unless-stopped as a safety net. (5) config-schema mismatch (compress/metrics_tables added in v0.107.0, pinned image was v0.104.0) -> bumped to 0.116.0. (6) 0.116.0 was an upstream-broken image (opentelemetry-collector-releases#783) -> bumped to 0.116.1. (7) ClickHouse auth: empty exporter credentials meeting an empty CLICKHOUSE_PASSWORD that current ClickHouse images no longer treat as no-password -> explicit shared password on both sides. Final verification: docker compose ps all healthy, make smoke 200 OK, SHOW TABLES confirms full schema, row counts climbing, full trace walk shows checkout's http.request/dependency.call/db.transaction/kafka.publish correctly parented, pool and consumer-lag gauges present."),
-            ("1", "In progress", "docs/layer1-manual-verification.md written: activation/reset commands and signature queries for all 6 scenarios. Awaiting live walkthrough and confirmation of each signature."),
+            ("1", "Closed", "All 6 scenarios verified live with distinct signatures (pool gauges, cache latency, deployment-triggered error rate, consumer lag, retry fan-out, auth failures). One real bug found and fixed along the way: notifications' unbounded consumer.recv() made kafka-lag silently unobservable; fixed with a 2s timeout so the pause check is always revisited. One process lesson: fault activation replaces the whole config per service, so always reset every service between scenarios, not just the ones touched."),
             ("2", "Not started", ""),
             ("3", "Not started", ""),
             ("4", "Not started", ""),

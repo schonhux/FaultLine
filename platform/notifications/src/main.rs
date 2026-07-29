@@ -85,8 +85,14 @@ async fn run_consumer(consumer: StreamConsumer, app: App) {
             continue;
         }
 
-        match consumer.recv().await {
-            Ok(message) => {
+        // Bounded wait, not an unbounded await: if the topic goes idle, recv() would
+        // otherwise block forever and this loop would never come back around to check
+        // pause_consumer again. That made the kafka-lag fault silently unobservable
+        // whenever there happened to be no in-flight message at the moment it was
+        // activated. A short timeout guarantees the pause check is always revisited.
+        match tokio::time::timeout(Duration::from_secs(2), consumer.recv()).await {
+            Err(_elapsed) => continue,
+            Ok(Ok(message)) => {
                 let payload = message
                     .payload_view::<str>()
                     .and_then(Result::ok)
@@ -105,7 +111,7 @@ async fn run_consumer(consumer: StreamConsumer, app: App) {
                 )
                 .ok();
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "orders.created consume failed");
                 sleep(Duration::from_millis(500)).await;
             }

@@ -9,10 +9,26 @@ repeatable scenario runner. Layer 1 exists to prove the signal is real before we
 General pattern for every scenario:
 
 1. Confirm baseline (traffic flowing normally, no faults active).
-2. `POST` a fault config to the owning service's `/internal/fault`.
-3. Wait the noted amount of time (trafficgen keeps generating load automatically at ~4 req/s).
-4. Run the signature query in ClickHouse and confirm it looks like the expected symptom.
-5. `POST /internal/fault/reset` on every service you touched. Never leave a fault active.
+2. `POST` a fault config to the owning service's `/internal/fault`. **This must include
+   `-H 'Content-Type: application/json'`** — axum's JSON extractor rejects the request
+   without it (`curl -d` alone sends `application/x-www-form-urlencoded`, which looks like it
+   succeeded from curl's point of view but the server actually returns an error body and the
+   fault is never applied).
+3. Immediately `GET` the same endpoint and confirm the field you set is actually `true`/nonzero
+   in the response, before waiting on anything. This is the cheap way to know the POST landed.
+4. Wait the noted amount of time (trafficgen keeps generating load automatically at ~4 req/s).
+5. Run the signature query in ClickHouse and confirm it looks like the expected symptom.
+6. `POST /internal/fault/reset` on **all four services, unconditionally** — not just the ones
+   you think you touched. `POST /internal/fault` replaces the entire config rather than merging
+   fields, so a fault left active on a service you didn't touch this round stays silently active
+   and contaminates every later scenario's results. Use the reset-all block below every time:
+
+```
+curl -s -X POST http://localhost:8080/internal/fault/reset
+curl -s -X POST http://localhost:8081/internal/fault/reset
+curl -s -X POST http://localhost:8082/internal/fault/reset
+curl -s -X POST http://localhost:8083/internal/fault/reset
+```
 
 All fault activation calls are plain HTTP, no auth required (the fault API is intentionally
 unauthenticated on the internal surface — see ADR-001). All ClickHouse queries use:
@@ -30,7 +46,7 @@ every subsequent request stalls on `db.begin()` until the 3s acquire timeout fir
 
 Activate:
 ```
-curl -s -X POST http://localhost:8081/internal/fault -d '{"db_connection_leak": true, "seed": 42}'
+curl -s -X POST http://localhost:8081/internal/fault -H 'Content-Type: application/json' -d '{"db_connection_leak": true, "seed": 42}'
 ```
 
 Wait ~15 seconds (pool_max is 20; at ~4 leaked connections/sec that pool is gone in 5s, give it
@@ -60,7 +76,7 @@ balloons even though Postgres and Redis themselves are healthy.
 
 Activate:
 ```
-curl -s -X POST http://localhost:8082/internal/fault -d '{"redis_latency_ms": 800}'
+curl -s -X POST http://localhost:8082/internal/fault -H 'Content-Type: application/json' -d '{"redis_latency_ms": 800}'
 ```
 
 Wait ~15 seconds.
@@ -91,7 +107,7 @@ curl -s -u default:faultline_otel 'http://localhost:8123/' --data "INSERT INTO o
 
 Immediately activate:
 ```
-curl -s -X POST http://localhost:8082/internal/fault -d '{"inject_error_rate": 0.6, "seed": 7}'
+curl -s -X POST http://localhost:8082/internal/fault -H 'Content-Type: application/json' -d '{"inject_error_rate": 0.6, "seed": 7}'
 ```
 
 Wait ~30 seconds.
@@ -116,7 +132,7 @@ normally, so lag climbs while the producer side stays healthy.
 
 Activate:
 ```
-curl -s -X POST http://localhost:8083/internal/fault -d '{"pause_consumer": true}'
+curl -s -X POST http://localhost:8083/internal/fault -H 'Content-Type: application/json' -d '{"pause_consumer": true}'
 ```
 
 Wait ~30 seconds.
@@ -141,8 +157,8 @@ would otherwise cause — with user-facing traffic volume unchanged.
 
 Activate both:
 ```
-curl -s -X POST http://localhost:8082/internal/fault -d '{"inject_error_rate": 0.5, "seed": 3}'
-curl -s -X POST http://localhost:8081/internal/fault -d '{"aggressive_retries": true}'
+curl -s -X POST http://localhost:8082/internal/fault -H 'Content-Type: application/json' -d '{"inject_error_rate": 0.5, "seed": 3}'
+curl -s -X POST http://localhost:8081/internal/fault -H 'Content-Type: application/json' -d '{"aggressive_retries": true}'
 ```
 
 Wait ~20 seconds.
@@ -168,7 +184,7 @@ with 401 on every call, starting at the exact moment the fault is flipped.
 
 Activate:
 ```
-curl -s -X POST http://localhost:8081/internal/fault -d '{"auth_expired": true}'
+curl -s -X POST http://localhost:8081/internal/fault -H 'Content-Type: application/json' -d '{"auth_expired": true}'
 ```
 
 Wait ~15 seconds.
