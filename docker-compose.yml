@@ -4,6 +4,7 @@ services:
   # ── Dependencies ─────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: shopgrid
       POSTGRES_PASSWORD: shopgrid
@@ -19,6 +20,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -28,24 +30,39 @@ services:
 
   redpanda:
     image: redpandadata/redpanda:v24.1.7
+    restart: unless-stopped
+    # No entrypoint override: the image's default entrypoint script prepares the
+    # data directory and ulimits before exec-ing redpanda. Overriding it with a
+    # bare `/bin/sh -c` (as this block previously did) skips that setup and the
+    # process crashes on startup. `command` is a plain list of discrete flags,
+    # which is the documented single-node dev pattern for this image.
     command:
-      - redpanda start --overprovisioned --smp 1 --memory 512M
-        --kafka-addr PLAINTEXT://0.0.0.0:9092
-        --advertise-kafka-addr PLAINTEXT://redpanda:9092
-    entrypoint: ["/bin/sh", "-c"]
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
     ports: ["9092:9092"]
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 20s
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
     environment:
       CLICKHOUSE_DB: otel
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_PASSWORD: faultline_otel
     ports: ["8123:8123", "9000:9000"]
     volumes:
       - ./observability/clickhouse/init:/docker-entrypoint-initdb.d:ro
@@ -58,6 +75,7 @@ services:
   # ── ShopGrid services (built in platform/) ───────────────────
   gateway:
     build: { context: ., dockerfile: platform/gateway/Dockerfile }
+    restart: unless-stopped
     environment: &svc-env
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       POSTGRES_DSN: postgres://shopgrid:shopgrid@postgres:5432/shopgrid?sslmode=disable
@@ -76,6 +94,7 @@ services:
 
   checkout:
     build: { context: ., dockerfile: platform/checkout/Dockerfile }
+    restart: unless-stopped
     environment: *svc-env
     ports: ["8081:8081"]
     depends_on:
@@ -86,6 +105,7 @@ services:
 
   catalog:
     build: { context: ., dockerfile: platform/catalog/Dockerfile }
+    restart: unless-stopped
     environment: *svc-env
     ports: ["8082:8082"]
     depends_on:
@@ -95,6 +115,7 @@ services:
 
   notifications:
     build: { context: ., dockerfile: platform/notifications/Dockerfile }
+    restart: unless-stopped
     environment: *svc-env
     ports: ["8083:8083"]
     depends_on:
@@ -103,6 +124,7 @@ services:
 
   trafficgen:
     build: { context: ., dockerfile: platform/trafficgen/Dockerfile }
+    restart: unless-stopped
     environment:
       TARGET_URL: http://gateway:8080
       TRAFFIC_SEED: 42
@@ -112,7 +134,8 @@ services:
 
   # ── Telemetry stack ──────────────────────────────────────────
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.104.0
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    restart: unless-stopped
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
       - ./observability/otel-collector/config.yaml:/etc/otel/config.yaml:ro
