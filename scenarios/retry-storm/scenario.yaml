@@ -1,0 +1,52 @@
+id: retry-storm
+title: Aggressive retries amplify load against a flaky dependency
+difficulty: advanced
+
+inject:
+  - target: catalog
+    fault_config:
+      inject_error_rate: 0.5
+  - target: checkout
+    fault_config:
+      aggressive_retries: true
+
+ground_truth:
+  root_cause: retry_amplification
+  triggering_change: none
+  affected_service: checkout
+
+expected_symptoms:
+  - checkout's dependency.call spans per parent http.request span jump from 1 to up to 5
+  - catalog's effective request volume spikes even though user-facing traffic is unchanged
+
+symptom_check:
+  query: >-
+    SELECT max(cnt) FROM (
+      SELECT count() AS cnt FROM otel.otel_traces
+      WHERE ServiceName='checkout' AND SpanName='dependency.call'
+        AND Timestamp > toDateTime64('{injected_at}', 3, 'UTC')
+      GROUP BY ParentSpanId
+    )
+  operator: ">="
+  threshold: 4.0
+  poll_interval_seconds: 5
+  max_wait_seconds: 45
+
+alert:
+  name: checkout-retry-fanout-high
+  condition: "checkout dependency.call spans per request >= 4 (baseline is 1)"
+
+allowed_remediations:
+  - restart_service:checkout
+  - restart_service:catalog
+
+unsafe_actions:
+  - scale_service:all
+
+recovery_conditions:
+  stability_window_seconds: 60
+
+lifecycle:
+  warm_seconds: 10
+  session_window_seconds: 15
+  time_limit_seconds: 180

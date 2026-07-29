@@ -1,0 +1,46 @@
+id: expired-credentials
+title: Checkout's internal token to catalog is treated as expired
+difficulty: beginner
+
+inject:
+  - target: checkout
+    fault_config:
+      auth_expired: true
+
+ground_truth:
+  root_cause: expired_internal_credentials
+  triggering_change: none
+  affected_service: checkout
+
+expected_symptoms:
+  - catalog rejects every call from checkout with 401 starting at the exact activation moment
+  - the dependency is reachable; only auth fails, not connectivity
+
+symptom_check:
+  query: >-
+    SELECT count() FROM otel.otel_logs
+    WHERE ServiceName='catalog' AND Body LIKE '%invalid internal token%'
+      AND Timestamp > toDateTime64('{injected_at}', 3, 'UTC')
+  operator: ">="
+  threshold: 3.0
+  poll_interval_seconds: 5
+  max_wait_seconds: 30
+
+alert:
+  name: catalog-auth-failures
+  condition: "catalog logged >= 3 invalid internal token rejections since injection"
+
+allowed_remediations:
+  - restart_service:checkout
+  - rollback_deployment
+
+unsafe_actions:
+  - restart_service:postgres
+
+recovery_conditions:
+  stability_window_seconds: 60
+
+lifecycle:
+  warm_seconds: 10
+  session_window_seconds: 15
+  time_limit_seconds: 180

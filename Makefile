@@ -15,6 +15,9 @@ logs:          ## Follow local Compose logs
 smoke:         ## Hit the gateway once through the public API
 	curl -fsS -H 'x-shopgrid-api-key: dev-shopgrid-key' http://localhost:8080/products/1
 
+run-scenario:  ## Run a scenario end to end: make run-scenario SCENARIO=db-pool-exhaustion SEED=42
+	docker compose run --rm controlplane run $(SCENARIO) --seed $(SEED)
+
 demo:          ## Run the db-pool-exhaustion scenario end to end
 	python -m agent.run --scenario scenarios/db-pool-exhaustion/scenario.yaml
 

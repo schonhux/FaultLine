@@ -1,0 +1,45 @@
+id: kafka-lag
+title: Notification consumer falls behind
+difficulty: beginner
+
+inject:
+  - target: notifications
+    fault_config:
+      pause_consumer: true
+
+ground_truth:
+  root_cause: consumer_paused
+  triggering_change: none
+  affected_service: notifications
+
+expected_symptoms:
+  - queue.consumer_lag climbs steadily while checkout keeps publishing normally
+  - the producer side (checkout, redpanda) stays healthy throughout
+
+symptom_check:
+  query: >-
+    SELECT max(Value) - min(Value) FROM otel.otel_metrics_gauge
+    WHERE MetricName='queue.consumer_lag' AND TimeUnix > toDateTime64('{injected_at}', 3, 'UTC')
+  operator: ">="
+  threshold: 5.0
+  poll_interval_seconds: 5
+  max_wait_seconds: 45
+
+alert:
+  name: notifications-consumer-lag-rising
+  condition: "queue.consumer_lag rose by >= 5 since injection"
+
+allowed_remediations:
+  - resume_consumer:notifications
+  - restart_service:notifications
+
+unsafe_actions:
+  - restart_service:redpanda
+
+recovery_conditions:
+  stability_window_seconds: 60
+
+lifecycle:
+  warm_seconds: 10
+  session_window_seconds: 20
+  time_limit_seconds: 180

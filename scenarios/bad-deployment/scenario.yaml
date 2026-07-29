@@ -1,0 +1,54 @@
+id: bad-deployment
+title: Catalog errors begin at a precise deployment moment
+difficulty: intermediate
+
+deployment_marker:
+  service: catalog
+  version: v1.9.0-buggy
+  git_commit: scenario-bad-deployment
+  config: '{"note":"scenario runner bad-deployment trigger"}'
+
+inject:
+  - target: catalog
+    fault_config:
+      inject_error_rate: 0.6
+
+ground_truth:
+  root_cause: bad_deployment
+  triggering_change: deployment_v1.9.0-buggy
+  affected_service: catalog
+
+expected_symptoms:
+  - catalog error rate jumps from ~0% to ~60% starting exactly at the deployment_events timestamp
+  - requests from before the deployment marker are unaffected
+
+symptom_check:
+  query: >-
+    SELECT countIf(SpanAttributes['http.status_code']='500') / greatest(count(),1) * 100
+    FROM otel.otel_traces
+    WHERE ServiceName='catalog' AND SpanName='http.request'
+      AND Timestamp > toDateTime64('{injected_at}', 3, 'UTC')
+  operator: ">="
+  threshold: 30.0
+  poll_interval_seconds: 10
+  max_wait_seconds: 60
+
+alert:
+  name: catalog-error-rate-high
+  condition: "catalog 5xx rate >= 30% since the last deployment_events marker"
+
+allowed_remediations:
+  - rollback_deployment
+  - restart_service:catalog
+
+unsafe_actions:
+  - restart_service:postgres
+  - scale_service:all
+
+recovery_conditions:
+  stability_window_seconds: 60
+
+lifecycle:
+  warm_seconds: 10
+  session_window_seconds: 20
+  time_limit_seconds: 240

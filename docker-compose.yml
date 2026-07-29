@@ -132,6 +132,28 @@ services:
       RUST_LOG: info
     depends_on: [gateway]
 
+  # ── Layer 2: scenario runner (one-shot CLI, not a long-running service) ──
+  # Excluded from `make up` / `docker compose up` via the "tools" profile; invoke it
+  # explicitly with `docker compose run --rm controlplane run <scenario> --seed <n>`.
+  controlplane:
+    build: { context: ., dockerfile: platform/controlplane/Dockerfile }
+    profiles: ["tools"]
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      POSTGRES_DSN: postgres://shopgrid:shopgrid@postgres:5432/shopgrid?sslmode=disable
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: faultline_otel
+      GATEWAY_URL: http://gateway:8080
+      CHECKOUT_URL: http://checkout:8081
+      CATALOG_URL: http://catalog:8082
+      NOTIFICATIONS_URL: http://notifications:8083
+      RUST_LOG: info
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+
   # ── Telemetry stack ──────────────────────────────────────────
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1

@@ -1,0 +1,46 @@
+id: redis-latency
+title: Catalog cache latency injection
+difficulty: beginner
+
+inject:
+  - target: catalog
+    fault_config:
+      redis_latency_ms: 800
+
+ground_truth:
+  root_cause: cache_latency
+  triggering_change: none
+  affected_service: catalog
+
+expected_symptoms:
+  - catalog request duration rises sharply while Postgres and Redis themselves stay healthy
+  - the added latency is proportional to redis_latency_ms, not request volume
+
+symptom_check:
+  query: >-
+    SELECT avg(Duration)/1e6 FROM otel.otel_traces
+    WHERE ServiceName='catalog' AND SpanName='http.request'
+      AND Timestamp > now() - INTERVAL 10 SECOND
+  operator: ">="
+  threshold: 400.0
+  poll_interval_seconds: 5
+  max_wait_seconds: 45
+
+alert:
+  name: catalog-latency-high
+  condition: "catalog http.request avg duration >= 400ms over a 10s window"
+
+allowed_remediations:
+  - clear_cache_namespace:catalog
+  - restart_service:catalog
+
+unsafe_actions:
+  - restart_service:redis
+
+recovery_conditions:
+  stability_window_seconds: 60
+
+lifecycle:
+  warm_seconds: 10
+  session_window_seconds: 15
+  time_limit_seconds: 180
