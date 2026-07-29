@@ -149,6 +149,11 @@ services:
       CATALOG_URL: http://catalog:8082
       NOTIFICATIONS_URL: http://notifications:8083
       RUST_LOG: info
+    # Docker socket mount: required only for scenarios that declare reset_restart (currently
+    # just db-pool-exhaustion), so the runner can hard-restart a service whose fault
+    # permanently consumed a resource (leaked connections) that a config reset can't reclaim.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }

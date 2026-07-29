@@ -57,6 +57,12 @@ struct Scenario {
     #[serde(default)]
     #[allow(dead_code)]
     recovery_conditions: serde_json::Value,
+    // Some faults (e.g. checkout's db_connection_leak) permanently consume a resource --
+    // resetting the fault config stops *new* damage but cannot undo damage already done.
+    // If set, the reset stage hard-restarts this container (by name) before proceeding,
+    // rather than trusting a config toggle to fully restore baseline.
+    #[serde(default)]
+    reset_restart: Option<String>,
     // Deliberately required, not #[serde(default)]: LifecycleDef's per-field defaults only
     // apply when individual keys are missing from an existing `lifecycle:` block. If the
     // whole block were absent, a struct-level default would need its own Default impl, and
@@ -195,6 +201,30 @@ async fn reset_all(client: &reqwest::Client) -> anyhow::Result<()> {
     for svc in ALL_SERVICES {
         reset_fault(client, svc).await?;
     }
+    Ok(())
+}
+
+/// Hard-restart a service container by name (docker compose's default naming:
+/// `faultline-<service>-1`). Requires the host Docker socket mounted into this
+/// container. Used for scenarios whose fault permanently consumes a resource that a
+/// config-level reset cannot reclaim.
+async fn hard_restart(service: &str) -> anyhow::Result<()> {
+    let container = format!("faultline-{service}-1");
+    tracing::warn!(
+        container = %container,
+        "hard-restarting container to reclaim a resource the fault permanently consumed"
+    );
+    let status = tokio::process::Command::new("docker")
+        .args(["restart", &container])
+        .status()
+        .await
+        .with_context(|| format!("shelling out to `docker restart {container}`"))?;
+    if !status.success() {
+        anyhow::bail!("docker restart {container} exited with status {status}");
+    }
+    // Give the restarted process a moment to rebind its port and rebuild its pool
+    // before the caller re-checks its fault/health state.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     Ok(())
 }
 
@@ -381,7 +411,24 @@ async fn main() -> anyhow::Result<()> {
     let telemetry = shared::telemetry::init("controlplane")?;
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Run { scenario, seed } => run_scenario(&scenario, seed).await,
+        Command::Run { scenario, seed } => {
+            // An interrupted run must never leave a fault stuck active -- that would
+            // violate the "always dormant unless explicitly activated, always cleanly
+            // reversible" safety property every other layer depends on. If Ctrl+C lands
+            // mid-run, race it against a best-effort reset of every service instead of
+            // just dying with whatever fault happened to be active at that moment.
+            tokio::select! {
+                r = run_scenario(&scenario, seed) => r,
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::warn!("interrupted -- resetting all fault state before exit");
+                    let http = reqwest::Client::new();
+                    let _ = reset_all(&http).await;
+                    Err(anyhow::anyhow!(
+                        "interrupted by user (Ctrl+C); all services were reset before exit"
+                    ))
+                }
+            }
+        }
     };
     telemetry.shutdown();
     result
@@ -421,6 +468,11 @@ async fn run_scenario(scenario_id: &str, seed: u64) -> anyhow::Result<()> {
 
     // 1. reset
     reset_all(&http).await.context("stage: reset")?;
+    if let Some(service) = &scenario.reset_restart {
+        hard_restart(service)
+            .await
+            .context("stage: reset (hard restart)")?;
+    }
     tracing::info!(run_id = %run_id, "stage complete: reset");
 
     // 2. load known-good: confirm every service actually reads back fully dormant
@@ -557,6 +609,11 @@ async fn run_scenario(scenario_id: &str, seed: u64) -> anyhow::Result<()> {
 
     // 10. reset
     reset_all(&http).await.context("stage: reset (final)")?;
+    if let Some(service) = &scenario.reset_restart {
+        hard_restart(service)
+            .await
+            .context("stage: reset (final, hard restart)")?;
+    }
     update_run_ended(&pg, run_id).await?;
     tracing::info!(run_id = %run_id, "stage complete: reset (final)");
 

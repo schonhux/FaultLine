@@ -14,6 +14,11 @@ inject:
     fault_config:
       db_connection_leak: true
 
+# The leak is permanent (a real connection is dropped from the pool, not just a flag).
+# Resetting the fault config stops new leaks but can't reclaim ones already lost, so this
+# scenario needs an actual container restart to return to a true baseline between runs.
+reset_restart: checkout
+
 ground_truth:
   root_cause: connection_pool_exhaustion
   triggering_change: deployment_v1.8.3-buggy
