@@ -1,15 +1,16 @@
-"""The Layer 3 investigation graph: context collection -> hypothesize -> investigate
-(ReAct loop, budget-limited) -> rank -> END, optionally extended (Layer 5) with a
-remediate phase: propose_* -> execute_remediation -> finalize_remediation -> END.
+"""The investigation graph: context collection -> hypothesize -> investigate (ReAct
+loop, budget-limited) -> rank -> END, optionally extended with a remediate phase:
+propose_* -> execute_remediation -> finalize_remediation -> END.
 
-Layer 4 invokes this graph once per (scenario, seed) run and scores the resulting
-`diagnosis` against that run's ground truth; it never passes remediation_tools, so the
-graph it gets is exactly the Layer 3 graph, unchanged. Layer 5 passes remediation_tools
-to get the extended graph -- see agent/main.py's --enable-remediation flag.
+The evaluation harness invokes this graph once per (scenario, seed) run and scores
+the resulting `diagnosis` against that run's ground truth; it never passes
+remediation_tools, so it gets the plain investigation graph, unchanged. Passing
+remediation_tools gets the extended graph -- see agent/main.py's --enable-remediation
+flag.
 
 `build_graph` takes the model and tools as arguments (dependency injection) rather
-than constructing them internally, specifically so tests can supply a fake model and
-a real (but locally-scoped) tool server -- see tests/test_graph.py.
+than constructing them internally, so tests can supply a fake model and a real (but
+locally-scoped) tool server -- see tests/test_graph.py.
 """
 
 from __future__ import annotations
@@ -99,7 +100,7 @@ async def _safe_collect(tools_by_name: dict[str, BaseTool], tool_name: str, args
 
 def _extract_remediation_outcome(messages: list) -> dict:
     """Scan the remediate-phase messages for the propose_* call the model made (if
-    any) and the terminal status the tools reported, so a Layer 4/5 harness or
+    any) and the terminal status the tools reported, so the evaluation harness or a
     transcript reader can see the outcome without re-parsing the raw message list."""
     proposed_tool: str | None = None
     proposed_target: str | None = None

@@ -1,11 +1,10 @@
-"""Direct, deterministic verification of the Layer 5 guarded-remediation mechanism --
-calls propose_restart_service / propose_rollback_deployment / execute_remediation
-straight through a real MCP client/server round trip against the running
-`remediation` container, Postgres, and Docker socket. Bypasses the LLM entirely: this
-proves the approval gate itself works (policy checks, pending state, human approval
-unblocking execution, denial blocking it, timeout defaulting to no action), which is
-the actual Layer 5 safety property -- independent of whether any particular agent run
-chooses to propose an action.
+"""Direct, deterministic verification of the guarded-remediation mechanism -- calls
+propose_restart_service / propose_rollback_deployment / execute_remediation straight
+through a real MCP client/server round trip against the running `remediation`
+container, Postgres, and Docker socket. Bypasses the LLM entirely: this proves the
+approval gate itself works (policy checks, pending state, human approval unblocking
+execution, denial blocking it, timeout defaulting to no action), independent of
+whether any particular agent run chooses to propose an action.
 
 Usage (run on the host; the remediation service must already be up -- `make
 remediation-up` -- since this connects to its published port directly):
@@ -56,7 +55,7 @@ def main() -> None:
     propose_p.add_argument("--target", required=True, help="gateway, checkout, catalog, or notifications")
     propose_p.add_argument(
         "--justification",
-        default="Manual Layer 5 verification run: confirming the approval gate blocks/allows execution correctly.",
+        default="Manual verification run: confirming the approval gate blocks/allows execution correctly.",
     )
     propose_p.add_argument("--run-id", default=None)
     propose_p.add_argument(

@@ -1,4 +1,4 @@
-"""Layer 4 evaluation harness: run every scenario (x seed) through the real stack --
+"""Evaluation harness: run every scenario (x seed) through the real stack --
 controlplane injects the fault, the agent investigates the resulting alert -- and
 score each diagnosis against that scenario's ground truth.
 

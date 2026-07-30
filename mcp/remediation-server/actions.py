@@ -1,10 +1,9 @@
 """The actual side-effecting operations a remediation can perform -- invoked only
 after policy checks pass AND a human has approved (see tools/remediation.py). These
-are deliberately the same two primitives platform/controlplane already uses for
-scenario setup/teardown (docker restart, POST /internal/fault/reset), not a new class
-of capability: Layer 5 gates *when* and *whether* they run behind an approval
-workflow, it doesn't introduce new privileges beyond what already exists elsewhere in
-the stack.
+are the same two primitives platform/controlplane already uses for scenario
+setup/teardown (docker restart, POST /internal/fault/reset), not a new class of
+capability: this just gates *when* and *whether* they run behind an approval
+workflow.
 """
 
 from __future__ import annotations

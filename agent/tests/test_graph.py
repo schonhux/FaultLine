@@ -3,12 +3,12 @@ tool loop, and the tool-call budget cutoff -- using a scripted fake model and th
 *real* telemetry MCP server (spawned as a real stdio subprocess, exercising the real
 langchain_mcp_adapters <-> FastMCP round trip).
 
-This deliberately only exercises list_runbooks/read_runbook tool calls, since those
-are the only Class-0 tools that don't require a live ClickHouse -- everything else
-in graph.py's wiring (context collection, message accumulation, routing, budget
-enforcement, structured-output parsing) is fully exercised regardless of which real
-tool gets called. Live verification against real ClickHouse data happens separately,
-against the actual Docker Compose stack -- see the Layer 3 section of the README.
+This only exercises list_runbooks/read_runbook tool calls, since those are the only
+Class-0 tools that don't require a live ClickHouse -- everything else in graph.py's
+wiring (context collection, message accumulation, routing, budget enforcement,
+structured-output parsing) is fully exercised regardless of which real tool gets
+called. Live verification against real ClickHouse data happens separately, against
+the actual Docker Compose stack.
 """
 
 from __future__ import annotations
@@ -65,9 +65,10 @@ class FakeModel:
     bind_tools, with_structured_output, and a plain ainvoke for the budget-exhausted
     branch. Not a real LangChain model -- a hand-rolled test double.
 
-    bind_tools is called twice in a Layer 5 run (once for investigation tools, once
-    for remediation tools) -- this distinguishes the two calls by tool name so each
-    gets its own scripted response sequence and its own position counter.
+    bind_tools is called twice when remediation is enabled (once for investigation
+    tools, once for remediation tools) -- this distinguishes the two calls by tool
+    name so each gets its own scripted response sequence and its own position
+    counter.
     """
 
     def __init__(
@@ -397,9 +398,9 @@ async def test_remediate_phase_respects_its_own_tool_call_budget(real_tools):
 
 
 def test_build_graph_without_remediation_tools_is_unchanged(real_tools):
-    """Regression guard: passing no remediation_tools (the Layer 3/4 default) must
-    produce a graph with no remediate/remediation_tools/finalize_remediation nodes at
-    all, so every existing Layer 3/4 caller is provably unaffected by Layer 5."""
+    """Regression guard: passing no remediation_tools (the default) must produce a
+    graph with no remediate/remediation_tools/finalize_remediation nodes at all, so
+    every existing caller is provably unaffected by the remediation feature."""
     hypotheses = HypothesesDraft(hypotheses=[HypothesisModel(statement="X", affected_service=None, confidence=0.5)])
     diagnosis = DiagnosisModel(
         root_cause="unknown",

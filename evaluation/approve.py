@@ -1,4 +1,4 @@
-"""CLI for approving/denying Layer 5 remediation proposals -- the human half of the
+"""CLI for approving/denying remediation proposals -- the human half of the
 guarded-remediation approval gate. Run this in a separate terminal while an agent
 investigation with --enable-remediation is in progress; the agent's execute_remediation
 tool call blocks (for a bounded time) waiting for exactly the decision this script

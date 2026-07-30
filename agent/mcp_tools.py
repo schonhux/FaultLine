@@ -1,17 +1,17 @@
-"""Wires the agent to the FaultLine telemetry MCP server, and (optionally, Layer 5)
-the guarded-remediation MCP server.
+"""Wires the agent to the telemetry MCP server, and optionally the guarded-remediation
+MCP server.
 
 The telemetry server is spawned as a stdio subprocess -- not a network service -- so
-the agent and telemetry-server live in the same container image (see Dockerfile) and
-talk over stdin/stdout, the standard MCP pattern for a client that owns its own tool
-server. This also means there is no network port to misconfigure or leave open: the
-process boundary is the security boundary.
+the agent and telemetry-server live in the same container image and talk over
+stdin/stdout, the standard MCP pattern for a client that owns its own tool server.
+There's no network port to misconfigure or leave open: the process boundary is the
+security boundary.
 
 The remediation server is different on purpose: it's a separate container with its
-own Docker-socket and service-network privileges the agent itself is deliberately
-denied (see docker-compose.yml), so the agent reaches it over the network
-(streamable-http) instead of spawning it as a local subprocess. See
-mcp/remediation-server/ and docs/safety-model.md.
+own Docker-socket and service-network privileges the agent itself is denied (see
+docker-compose.yml), so the agent reaches it over the network (streamable-http)
+instead of spawning it as a local subprocess. See mcp/remediation-server/ and
+docs/safety-model.md.
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ def build_mcp_client(
     unchanged -- nothing extra needs to be threaded through here by hand.
 
     If include_remediation is True, the client also gets a network connection entry
-    for the Layer 5 remediation server (REMEDIATION_SERVER_URL, default
-    http://remediation:9500/mcp) -- opt-in, since most investigation runs (Layers 3/4)
-    have no need for it.
+    for the remediation server (REMEDIATION_SERVER_URL, default
+    http://remediation:9500/mcp) -- opt-in, since most investigation runs have no
+    need for it.
     """
     telemetry_server_dir = telemetry_server_dir or os.environ.get(
         "TELEMETRY_SERVER_DIR", "/app/mcp/telemetry-server"
@@ -102,12 +102,12 @@ async def load_tools_session(client: MultiServerMCPClient | None = None):
 
 @asynccontextmanager
 async def load_remediation_tools_session(client: MultiServerMCPClient | None = None):
-    """Same pattern as load_tools_session, but for the Layer 5 remediation server.
+    """Same pattern as load_tools_session, but for the remediation server.
 
-    Kept as a separate function (rather than folding into load_tools_session) so
-    every existing Layer 3/4 caller -- main.py's default path, both graph tests, the
-    session-reuse test -- is completely untouched: none of them pass
-    include_remediation, so nothing about their behavior changes.
+    Kept as a separate function rather than folded into load_tools_session so every
+    existing caller (main.py's default path, the graph tests, the session-reuse
+    test) is untouched: none of them pass include_remediation, so nothing about
+    their behavior changes.
 
     `client` must have been built with build_mcp_client(include_remediation=True), or
     this will fail to find the "remediation" server entry.

@@ -9,7 +9,7 @@ shape, response parsing, and input validation using httpx.MockTransport. Run wit
     pytest tests/ -v
 
 Live verification against real ClickHouse (with actual scenario data) is a separate,
-manual step -- see the Layer 3 section of the README.
+manual step against the running Docker Compose stack.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 //! trafficgen — deterministic seeded load for ShopGrid.
 //!
-//! The scenario runner will eventually own lifecycle timing. For Layer 0 this
-//! keeps gateway/checkout/catalog/notifications warm with reproducible traffic.
+//! Keeps gateway/checkout/catalog/notifications warm with reproducible traffic so
+//! there's always a realistic baseline for the controlplane to inject faults into.
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use reqwest::StatusCode;

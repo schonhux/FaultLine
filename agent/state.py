@@ -1,9 +1,9 @@
 """Shared state for the investigation graph.
 
-The graph moves through four Layer 3 phases -- context collection -> hypothesis
-generation -> investigation -> ranking -- optionally followed by a Layer 5 remediate
-phase (propose -> approve -> execute) when build_graph is given remediation_tools.
-`diagnosis` is Layer 3's terminal field; `remediation` is Layer 5's, and is left
+The graph moves through four phases -- context collection -> hypothesis generation
+-> investigation -> ranking -- optionally followed by a remediate phase (propose ->
+approve -> execute) when build_graph is given remediation_tools. `diagnosis` is the
+investigation's terminal field; `remediation` is the remediate phase's, and is left
 unset entirely when remediation isn't enabled for a run.
 
 Everything here is plain, JSON-serializable data (TypedDicts, not custom classes) so a
@@ -37,7 +37,7 @@ class Diagnosis(TypedDict):
 
 
 class RemediationOutcome(TypedDict, total=False):
-    """What (if anything) the Layer 5 remediate phase did after diagnosis. `status`
+    """What (if anything) the remediate phase did after diagnosis. `status`
     mirrors the remediation server's own terminal states: none_proposed (the agent
     judged no safe action applied), denied (failed a policy check), pending_approval
     (approved by policy but no human decision arrived -- shouldn't be terminal in
@@ -53,10 +53,10 @@ class RemediationOutcome(TypedDict, total=False):
 
 
 class AgentState(TypedDict, total=False):
-    # Inputs, set once at graph invocation -- this is deliberately the *only* thing the
-    # agent is told about the incident. It never sees scenario_id, fault_config, or
-    # ground_truth; an alert name/condition string is what a real on-call engineer gets
-    # paged with, and that's the full extent of this agent's privileged information.
+    # Inputs, set once at graph invocation -- the only thing the agent is told about
+    # the incident. It never sees scenario_id, fault_config, or ground_truth; an
+    # alert name/condition string is what a real on-call engineer gets paged with,
+    # and that's the full extent of this agent's privileged information.
     alert_name: str
     alert_condition: str
     run_id: str | None
@@ -75,10 +75,11 @@ class AgentState(TypedDict, total=False):
     # Populated by hypothesize, refined by rank.
     hypotheses: list[Hypothesis]
 
-    # Final output of Layer 3 -- what Layer 4 scores against ground_truth.
+    # Final output of the investigation -- what the evaluation harness scores
+    # against ground_truth.
     diagnosis: Diagnosis | None
 
-    # Layer 5 only: populated when build_graph is given remediation_tools. Mirrors
+    # Only populated when build_graph is given remediation_tools. Mirrors
     # tool_call_count/messages' role but for the separate remediate <-> remediation_tools
     # loop, so investigation's own budget/messages are untouched by remediation.
     remediation_tool_call_count: int

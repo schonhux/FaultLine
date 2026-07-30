@@ -5,18 +5,15 @@ connection pool between runs -- but nothing resets ClickHouse itself. Every trac
 log line, metric point, and deployment marker from every previous scenario in the
 sweep stays there indefinitely. An agent investigating scenario N's alert can query
 `get_recent_deployments` or `find_traces` and get back data from scenario N-1, N-2,
-etc, and misattribute the wrong cause entirely -- this is exactly what happened
-live: an agent investigating `redis-latency` found `bad-deployment`'s leftover
-deployment marker (still sitting in ClickHouse from an earlier run in the same
-sweep) and confidently diagnosed the wrong scenario.
+etc, and misattribute the wrong cause entirely -- this actually happened: an agent
+investigating `redis-latency` found `bad-deployment`'s leftover deployment marker
+from an earlier run in the same sweep and confidently diagnosed the wrong scenario.
 
-This truncates the tables an investigating agent can read Class-0 tools would
-otherwise return contaminated results, plus deployment_events, before each run
-in the evaluation sweep. It intentionally also wipes Layer 0's seed baseline
-deployment rows (dated 2026-07-27) -- that's a deliberate tradeoff: a stale
-3-day-old fixture deployment is not useful context for diagnosing a fresh
-incident either, and `make down && make up` restores it if ever needed for
-something else.
+This truncates the tables an investigating agent can read before each run in the
+sweep, so Class-0 tools don't return contaminated results. It also wipes the seed
+baseline deployment rows (dated 2026-07-27) -- a stale 3-day-old fixture deployment
+isn't useful context for diagnosing a fresh incident either, and `make down && make
+up` restores it if ever needed for something else.
 """
 
 from __future__ import annotations

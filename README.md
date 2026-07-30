@@ -1,242 +1,139 @@
 # FaultLine
 
-**An evaluation arena for AI incident-response agents.**
+**A benchmark that measures how well an AI agent can diagnose and fix a real production outage.**
 
-FaultLine measures how accurately, efficiently, and *safely* AI agents diagnose and remediate
-failures in a real distributed system. It injects known faults into an instrumented e-commerce
-platform (ShopGrid), lets an agent investigate through a constrained operational tool layer,
-and scores the result against ground truth.
+Most "AI SRE" demos are a chatbot answering questions about logs. FaultLine is different: it's
+a full e-commerce application with a real database, cache, and message queue behind it, wired up
+with production-grade observability, that injects an actual failure — a connection leak, a bad
+deploy, expired credentials, a retry storm — and then hands an LLM agent nothing but a pager alert.
+The agent has to go find the root cause itself, using the same kind of tools a real on-call
+engineer would reach for, and it's scored against a known ground truth. Optionally, it can also
+propose a fix, but nothing runs without a human clicking approve first.
 
-> The product is not "an LLM that fixes outages." The product is a **reproducible benchmark**
-> for agentic incident response — with known root causes, safety policies, and measured baselines.
+It's a benchmark, not a toy: every fault is deterministic and reproducible, every diagnosis is
+graded automatically, and every write action goes through a policy engine before a human ever
+sees it.
 
-## What a run looks like
+## How it works
 
-1. Pick a scenario (e.g. `db-pool-exhaustion`) — FaultLine resets the environment, warms traffic,
-   verifies baseline health, and injects the fault.
-2. The agent receives the alert and investigates via read-only MCP tools: metrics, logs, traces,
-   deployment history, runbooks.
-3. It maintains explicit competing hypotheses with supporting/contradicting evidence, then submits
-   a root-cause diagnosis with confidence and a proposed remediation.
-4. Consequential actions (rollback, restart, scale) require human approval through a policy engine.
-5. FaultLine executes the approved action, verifies recovery against the scenario's recovery
-   conditions, and produces a scorecard.
-
-```
-Root-cause accuracy:       Correct
-Top-three recall:          Pass
-Diagnosis time:            2m 41s
-Telemetry queries:         12
-Unsupported claims:        0
-Unsafe actions attempted:  0
-Remediation:               Successful
-Recovery verified:         Yes
-```
+1. **Pick a scenario.** Six failure modes are defined in `scenarios/`, each with a known root
+   cause, expected symptoms, and a recovery condition — a connection pool exhaustion, a bad
+   deployment, expired internal credentials, Kafka consumer lag, Redis latency, and a retry storm.
+2. **The fault gets injected** into the running application by a Rust control plane, which also
+   verifies the app was healthy beforehand and confirms the symptom actually shows up in the
+   telemetry before calling it a real incident.
+3. **The agent gets paged** — literally just an alert name and a condition string, nothing else.
+   It has no access to the scenario definition, the fault config, or the ground truth.
+4. **It investigates** using a constrained set of read-only tools: query metrics, search logs,
+   find distributed traces, check recent deployments, read runbooks. It builds and narrows down
+   competing hypotheses as it goes.
+5. **It submits a diagnosis** — root cause, affected service, confidence, and the evidence it's
+   standing on — which gets scored against ground truth by an automated evaluation harness.
+6. **Optionally, it proposes a fix.** A restart or rollback goes through a policy check and then
+   sits as `pending_approval` until a human approves or denies it. Nothing executes unilaterally.
 
 ## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────┐
 │                    FaultLine Web Console                   │
-│  Scenarios • Live Investigation • Approval • Scorecards    │
+│  Scenarios • Live Investigation • Approvals • Scorecards    │
 └────────────────────────────┬───────────────────────────────┘
 ┌────────────────────────────▼───────────────────────────────┐
-│                   FaultLine Control Plane (Rust)           │
-│  Scenario Runner • Agent Sessions • Evaluations • Reports  │
+│                   Control Plane (Rust)                      │
+│  Fault injection • run tracking • recovery verification      │
 └───────────────┬──────────────────────────┬─────────────────┘
         ┌───────▼──────────┐      ┌────────▼──────────┐
-        │ Agent (Python/   │      │ Evaluation Engine │
-        │ LangGraph + MCP) │      │ + Ground Truth    │
+        │ Agent (Python /  │      │ Evaluation Engine │
+        │ LangGraph + MCP) │      │ (LLM-as-judge)     │
         └───────┬──────────┘      └───────────────────┘
 ┌───────────────▼────────────────────────────────────────────┐
-│              Operational Tool Layer (MCP, read/write)      │
-│  Metrics • Logs • Traces • Deployments • Runbooks • Ops    │
+│         MCP Tool Layer (read-only + guarded write)          │
+│  Metrics • Logs • Traces • Deployments • Runbooks • Ops      │
 └───────────────┬────────────────────────────────────────────┘
 ┌───────────────▼────────────────────────────────────────────┐
-│          ShopGrid — Application Under Test (Rust)          │
-│  Gateway • Checkout • Catalog • Notification Worker        │
-│  PostgreSQL • Redis • Redpanda (Kafka API)                 │
+│           ShopGrid — the application under test              │
+│  Gateway • Checkout • Catalog • Notifications                │
+│  PostgreSQL • Redis • Redpanda (Kafka API)                   │
 └───────────────┬────────────────────────────────────────────┘
 ┌───────────────▼────────────────────────────────────────────┐
-│        Telemetry: OTel Collector • ClickHouse SQL surface  │
+│        OTel Collector → ClickHouse (metrics/logs/traces)     │
 └────────────────────────────────────────────────────────────┘
 ```
+
+The agent only ever talks to the MCP tool layer — it has no direct database access, no Docker
+socket, and no visibility into fault-injection state. Anything it "knows" about an incident, it
+had to go query for itself, the same way a human on-call engineer would.
+
+## Tech stack
+
+| Layer | Tech |
+|---|---|
+| Application under test (ShopGrid) | Rust, Axum, Tokio |
+| Control plane / fault injection | Rust |
+| Investigation agent | Python, LangGraph, LangChain, Anthropic Claude |
+| Tool layer | MCP (Model Context Protocol), two servers: one read-only, one privileged |
+| Evaluation | Python, LLM-as-judge scoring |
+| Data & telemetry | PostgreSQL, Redis, Redpanda (Kafka-compatible), ClickHouse, OpenTelemetry |
+| Web console | Next.js, TypeScript, Tailwind, Radix UI, Server-Sent Events |
+| Infra | Docker Compose |
 
 ## Quick start
 
 ```bash
-make up          # start ShopGrid + telemetry stack
-make demo        # run the db-pool-exhaustion scenario end to end
-make eval        # score all recorded runs
+make up                              # start ShopGrid + telemetry stack
+make run-scenario SCENARIO=db-pool-exhaustion SEED=42
+make run-agent ALERT_NAME="..." ALERT_CONDITION="..."   # printed by the run above
+make eval                            # score all six scenarios end to end
 ```
 
-Requires Docker, Rust, Python 3.11+, and an LLM API key for live agent runs
-(recorded runs replay without any API access).
+Or skip the manual wiring and use the web console — `cd apps/console && npm install && npm run
+dev` (with `make up` already running) gives you a browser UI to launch scenarios, watch the
+agent investigate live, and approve/deny any proposed fix.
+
+Requires Docker, Rust, Python 3.11+, Node 20+, and an Anthropic API key for live agent runs.
+
+## Safety model
+
+Every write action the agent can take falls into one of four classes: reads are unrestricted,
+low-risk changes (like a service restart) are policy-checked, consequential changes (like a
+rollback) always require human approval, and destructive actions (deleting data, touching
+infrastructure) are never exposed as callable tools at all — not blocked, just nonexistent. The
+policy engine that enforces this lives in its own container with its own credentials, separate
+from the agent, so the agent itself never holds the privileges it would need to bypass it. Full
+detail in [`docs/safety-model.md`](docs/safety-model.md).
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `platform/` | ShopGrid services (Rust/axum) with OTel instrumentation and fault-injection hooks |
-| `scenarios/` | Scenario definitions with ground truth, symptoms, and recovery conditions |
-| `agent/` | LangGraph investigation agent: state machine, prompts, tests |
-| `mcp/` | MCP servers exposing the constrained operational tool layer |
-| `apps/` | Control plane (Rust) and web console (Next.js) |
-| `evaluation/` | Scorers, baselines, datasets, reports |
-| `observability/` | OTel Collector and ClickHouse initialization/configuration |
-| `runbooks/` | Operational runbooks the agent can retrieve |
-| `docs/` | Architecture decision records, incident catalog, and the safety model |
+| `platform/` | ShopGrid services (Rust/Axum) and the control plane, with OTel instrumentation and fault-injection hooks |
+| `scenarios/` | Scenario definitions — ground truth, symptoms, recovery conditions |
+| `agent/` | The LangGraph investigation agent |
+| `mcp/` | The two MCP servers (telemetry, guarded remediation) |
+| `apps/console/` | The web console (Next.js) |
+| `evaluation/` | The scoring harness, approval CLI, and generated reports |
+| `observability/` | OTel Collector and ClickHouse setup |
+| `runbooks/` | Runbooks the agent can retrieve as reference material |
+| `docs/` | Architecture decisions and the safety model |
 
-## Layer 3: investigation agent
-
-The agent (`agent/`) is a LangGraph state machine -- context collection → hypothesis
-generation → investigation → ranking -- backed by a Python MCP server (`mcp/telemetry-server/`)
-that exposes exactly the Class-0 ("harmless read") tools: `query_metrics`, `search_logs`,
-`find_traces` / `get_trace`, `get_recent_deployments`, `read_runbook`. The two run in one
-container; the agent spawns the telemetry server as a local stdio subprocess, so there's no
-network port between them.
-
-The agent is given only an alert name and condition string -- the same thing a real on-call
-engineer gets paged with. It never has access to fault-injection state, scenario definitions,
-ground truth, or Postgres (the `runs`/`alerts` tables that hold that information aren't
-reachable from the agent's container at all). Everything it "knows" about the incident, it had
-to go query for itself.
-
-To run it against a live incident:
+## Testing
 
 ```bash
-make up
-make run-scenario SCENARIO=db-pool-exhaustion SEED=42
-# note the alert name/condition printed by the run above (or query the `alerts` table), then:
-make run-agent ALERT_NAME="checkout-pool-exhausted" ALERT_CONDITION="db.pool.active >= 18 (of pool_max 20)"
+make test
 ```
 
-or `make demo`, which does the first two steps and prints the alert for you to feed into
-`run-agent`. This prints the agent's final diagnosis (root cause, affected service, confidence,
-evidence summary) as JSON. Add `--transcript-out path.json` (via `docker compose run --rm agent
-...`) to also save the full investigation transcript for replay.
-
-`mcp/telemetry-server/tests/` and `agent/tests/` cover the tool layer and graph control flow
-(routing, the tool-call budget, error handling) against a mocked/fake ClickHouse -- run them with
-`make test`. They do not, and cannot, verify diagnosis *quality* against the real stack; that's a
-live check against your own running `make up` environment and an `ANTHROPIC_API_KEY`.
-
-**Verified live:** the agent correctly diagnosed `db-pool-exhaustion` -- root cause (a connection
-leak in the buggy deployment), affected service (`checkout`), and the exact triggering deployment
--- all backed by cited evidence (specific metric buckets, deployment timestamps, log lines, and a
-trace ID), not just a repeated runbook guess.
-
-## Layer 4: evaluation harness
-
-`evaluation/harness.py` runs Layers 2 and 3 together across every scenario (and however many seeds
-you want) and scores the result:
-
-```bash
-export ANTHROPIC_API_KEY=...
-make up
-make eval                 # all 6 scenarios, seed 42
-make eval SEEDS=42,7,101  # multiple seeds per scenario
-```
-
-For each (scenario, seed) it injects the fault via `controlplane`, reads the alert *that run*
-fired straight from Postgres (not "whatever fired most recently" -- the harness is the one thing
-in this repo with Postgres/ground-truth access, since it's the answer key), runs the agent against
-just that alert, and scores the diagnosis three ways: `affected_service` and `triggering_change`
-by direct/token comparison (both are effectively closed-form), and `root_cause` plus
-"unsupported claims" by an LLM judge (`evaluation/scorers/diagnosis_scorer.py`, using a small/cheap
-model) that checks the diagnosis's substance against ground truth and checks every claim in its
-evidence summary against what the transcript actually shows. Results land in
-`evaluation/reports/` as both a JSON report and a self-contained HTML scorecard.
-
-## Layer 5: guarded remediation
-
-`mcp/remediation-server/` is a second MCP server, deliberately its own container (not bundled
-into the agent image the way the telemetry server is): it holds the Docker socket and
-application-service network access the investigation agent is denied everywhere else in this
-project. The agent only ever reaches it over the network, through exactly two tools:
-
-- `propose_restart_service(target, justification, run_id)` — Class 1 (low-risk)
-- `propose_rollback_deployment(target, justification, run_id)` — Class 2 (consequential)
-
-Both go through a server-side policy engine (`policy.py`) before anything is recorded: the
-target must be an application service (`gateway`/`checkout`/`catalog`/`notifications` —
-infrastructure is never a valid target, which is how "Class 3 actions are never exposed" is
-actually enforced), the justification must cite real evidence, and at most one remediation is
-allowed per investigation. If policy passes, the proposal is written to Postgres
-(`remediations` table) as `pending_approval` — nothing has happened yet. A human then runs
-`python3 evaluation/approve.py list` / `approve <id>` / `deny <id>` in another terminal, and a
-third tool, `execute_remediation(approval_id)`, polls (bounded, default 90s) for that decision
-and only then performs the real action (`docker restart`, or `POST /internal/fault/reset` for
-a rollback). No decision within the timeout means no action — the safe default.
-
-This is wired into the agent as a new `remediate` phase after `rank`, present only when
-`build_graph` is given `remediation_tools` — Layer 3/4 runs never pass that, so their graph is
-byte-for-byte the original Layer 3 graph. To run it:
-
-```bash
-make up
-make remediation-up
-make run-scenario SCENARIO=db-pool-exhaustion SEED=42
-make run-agent-remediate ALERT_NAME="..." ALERT_CONDITION="..." RUN_ID="..."
-# in another terminal, once the agent proposes an action:
-make approvals
-python3 evaluation/approve.py approve <id>
-```
-
-`mcp/remediation-server/tests/` covers the policy engine, the Docker/HTTP action wrappers
-(mocked), and the full propose → approve → execute flow (mocked Postgres) — 20 tests, all
-passing. `agent/tests/test_graph.py` covers the new `remediate` phase's routing and budget, plus
-a regression test proving the graph is unchanged when `remediation_tools` isn't passed. What
-none of this can verify without your running Docker Compose stack, Postgres, and a live
-`ANTHROPIC_API_KEY`: that the agent actually proposes a sensible action against a real scenario,
-that a real human approval unblocks `execute_remediation`, and that the restarted/rolled-back
-service actually recovers. That live run is the Layer 5 exit criterion.
-
-## Key design decisions
-
-- **Application-level fault injection, not chaos tooling** — every fault is a deterministic,
-  seedable code path toggled through a fault-config API. Ground truth is exact by construction.
-  See [ADR-001](docs/architecture/adr-001-fault-injection.md).
-- **State machine, not a free agent loop** — the agent moves through explicit phases
-  (context collection → hypothesis generation → investigation → ranking → remediation proposal
-  → approval → verification) with persisted state.
-- **Safety classes 0–3** — reads are free (Class 0, what the Layer 3 agent has today),
-  low-risk changes are configurable (Class 1), consequential changes always require approval
-  (Class 2), and destructive actions are never exposed as tools at all (Class 3). Layer 5 adds
-  the Class 1/2 write tools and the approval gate on top of the same agent graph. See
-  [docs/safety-model.md](docs/safety-model.md).
-- **Record and replay** — every run stores the full message/tool trace so evaluation and demos
-  never require re-running the model.
+Runs the Rust workspace tests plus the Python test suites (telemetry tools, remediation policy
+engine, and the agent's graph logic) against mocked infrastructure — fast, deterministic, and
+independent of any running Docker stack or live model calls. Actual diagnosis quality and
+end-to-end remediation are verified separately against the real running stack; see the
+Makefile targets above.
 
 ## Status
 
-Under active development. Current phase: Layer 5 (guarded remediation).
-
-**Closed, with live evidence:**
-- **Layer 0** — instrumented ShopGrid (gateway, checkout, catalog, notifications), Postgres,
-  Redis, Redpanda, ClickHouse, OTel Collector. `make up` proves steady traffic and ClickHouse
-  queries show distributed traces plus RED/pool/cache/queue metrics.
-- **Layer 1** — all 6 fault scenarios manually verified end to end against the live stack.
-- **Layer 2** — the scenario runner (`platform/controlplane`, Rust): all 6 scenarios run
-  start-to-finish through `make run-scenario` with zero manual steps, including a self-healing
-  hard-restart for the one scenario (`db-pool-exhaustion`) whose fault permanently consumes a
-  resource a config reset can't reclaim.
-- **Layer 3** — the LangGraph investigation agent and telemetry MCP server, verified live: given
-  only an alert name/condition (never ground truth), it correctly diagnosed `db-pool-exhaustion`'s
-  root cause, affected service, and triggering deployment, backed by cited evidence.
-- **Layer 4** — `make eval` run live across all 6 scenarios: 6/6 ran end to end with no harness
-  failures, no cross-scenario contamination (verified by inspecting every diagnosis individually),
-  4/6 correct root cause, 5/6 correct affected service, 6/6 correct triggering change. The two
-  misses are genuine agent diagnostic nuance (confirmed via the judge's own rationale), not
-  harness bugs.
-
-**In progress:**
-- **Layer 5** — the remediation server, policy engine, approval gate, and the agent's new
-  `remediate` phase are built and covered by unit tests (20 passing in
-  `mcp/remediation-server/tests/`, 4 new passing in `agent/tests/test_graph.py`, all mocked —
-  no real Postgres/Docker/Claude call in any of them). What's *not* yet verified: a live run
-  against the real Docker Compose stack proving the agent proposes a sensible action, a human
-  approval via `evaluation/approve.py` actually unblocks execution, and the targeted service
-  recovers. That live run is the Layer 5 exit criterion.
-
-**Not started:** Layer 6 (console/demo).
+The core system — fault injection, agent investigation, evaluation scoring, and guarded
+remediation — is built and verified end-to-end against the live stack: the agent correctly
+diagnoses real injected faults with cited evidence, `make eval` scores all six scenarios
+automatically, and a proposed remediation genuinely blocks on human approval before anything
+executes. The web console is built on top of that same system and is in final testing before
+it's demo-ready.

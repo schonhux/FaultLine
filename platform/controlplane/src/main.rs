@@ -1,7 +1,7 @@
-//! controlplane (binary: `faultline`) — Layer 2 scenario runner.
+//! controlplane (binary: `faultline`) — the scenario runner.
 //!
-//! Automates exactly the sequence Layer 1 proved by hand: reset -> load known-good ->
-//! warm -> baseline-health gate -> inject -> symptom gate -> session window -> verify ->
+//! Automates the full fault-injection lifecycle: reset -> load known-good -> warm ->
+//! baseline-health gate -> inject -> symptom gate -> session window -> verify ->
 //! score-ready -> reset. Every run is recorded in Postgres (`runs`, `alerts`) with the
 //! seed and ground truth, so `faultline run <scenario> --seed 42` is reproducible and
 //! auditable, not a one-off script.

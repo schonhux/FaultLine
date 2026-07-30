@@ -1,7 +1,7 @@
 """get_recent_deployments -- Class 0 (harmless read) tool, backed by otel.deployment_events.
 
-Note on time filtering: the Layer 0 seed data is deliberately dated 2026-07-27 (fixed,
-historical timestamps), while a scenario's own deployment_marker (if any) is inserted
+Note on time filtering: the seed data is dated 2026-07-27 (fixed, historical
+timestamps), while a scenario's own deployment_marker (if any) is inserted
 with the real wall-clock time when the scenario runner injects the fault. A naive
 "only look at the last N minutes" filter would silently miss the seed rows. So
 since_minutes here is opt-in: by default this returns the most recent `limit` rows

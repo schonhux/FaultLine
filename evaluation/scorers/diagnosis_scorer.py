@@ -1,4 +1,4 @@
-"""Score a Layer 3 diagnosis against a scenario's ground truth.
+"""Score an agent's diagnosis against a scenario's ground truth.
 
 Two kinds of checks:
   - Deterministic: affected_service (a closed set of 4 known services -- exact match

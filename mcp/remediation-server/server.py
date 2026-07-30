@@ -1,18 +1,18 @@
-"""FaultLine Layer 5 guarded-remediation MCP server.
+"""The guarded-remediation MCP server.
 
 Runs as its own container (see docker-compose.yml's `remediation` service) with the
 Docker socket and application-service network access the investigation agent is
-deliberately denied (see agent/ in docker-compose.yml). The agent only ever reaches
-these two actions over the network, through narrow, policy-checked, approval-gated
-tools -- never raw Docker or service access itself. See docs/safety-model.md for the
-full design this implements.
+denied (see agent/ in docker-compose.yml). The agent only ever reaches these two
+actions over the network, through narrow, policy-checked, approval-gated tools --
+never raw Docker or service access itself. See docs/safety-model.md for the full
+design this implements.
 
-Run with: python server.py   (streamable-http transport, since this is a standalone
-network service the agent's container connects to -- not a stdio subprocess of the
-agent process itself, unlike the telemetry server).
+Run with: python server.py (streamable-http transport, since this is a standalone
+network service the agent's container connects to, not a stdio subprocess of the
+agent process itself like the telemetry server).
 
-Deliberately does NOT use `from __future__ import annotations`, for the same reason
-as mcp/telemetry-server/server.py: this mcp SDK version's tool registration inspects
+Does NOT use `from __future__ import annotations`, same reason as
+mcp/telemetry-server/server.py: this mcp SDK version's tool registration inspects
 each parameter's live annotation object, and a lazily-stringified annotation breaks
 that.
 """

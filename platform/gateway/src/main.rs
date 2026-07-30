@@ -1,8 +1,8 @@
 //! gateway — external ShopGrid edge.
 //!
-//! It keeps the public API small, attaches request IDs, applies a deliberately
-//! lightweight auth check, and forwards traffic to checkout/catalog with trace
-//! context propagated through the shared HTTP client.
+//! It keeps the public API small, attaches request IDs, applies a lightweight auth
+//! check, and forwards traffic to checkout/catalog with trace context propagated
+//! through the shared HTTP client.
 
 use axum::{
     extract::{Path, State},

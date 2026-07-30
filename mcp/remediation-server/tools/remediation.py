@@ -1,6 +1,6 @@
-"""The Layer 5 remediation tools: propose_restart_service, propose_rollback_deployment,
-and execute_remediation. Nothing else is exposed anywhere in this server -- there is
-no tool for touching infrastructure services, deleting data, changing credentials, or
+"""The remediation tools: propose_restart_service, propose_rollback_deployment, and
+execute_remediation. Nothing else is exposed anywhere in this server -- there is no
+tool for touching infrastructure services, deleting data, changing credentials, or
 disabling observability. Those aren't blocked by a check; they simply don't exist as
 callable tools, which is what docs/safety-model.md means by "Class 3: never exposed."
 
