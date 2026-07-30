@@ -28,13 +28,15 @@ demo:          ## Run db-pool-exhaustion, then print the alert it fired so you c
 		-c "SELECT name, condition FROM alerts ORDER BY fired_at DESC LIMIT 1;"
 	@echo "--- now run: make run-agent ALERT_NAME=\"<name above>\" ALERT_CONDITION=\"<condition above>\" ---"
 
-eval:          ## Score all recorded runs (Layer 4 -- not built yet)
-	python -m evaluation.scorers.run_all
+eval:          ## Run + score scenarios end to end: make eval SCENARIOS=redis-latency SEEDS=42,7
+	python3 -m pip install -q -r evaluation/requirements.txt
+	python3 evaluation/harness.py --seeds "$(or $(SEEDS),42)" $(if $(SCENARIOS),--scenarios "$(SCENARIOS)")
 
 test:          ## Run Rust and Python tests
 	cargo test --workspace
-	cd mcp/telemetry-server && pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
-	cd agent && pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
+	cd mcp/telemetry-server && python3 -m pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
+	cd agent && python3 -m pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
+	python3 -m pip install -q -r evaluation/requirements-dev.txt && python3 -m pytest evaluation/tests/ -v
 
 fmt:           ## Format Rust workspace
 	cargo fmt --all

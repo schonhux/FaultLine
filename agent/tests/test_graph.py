@@ -27,7 +27,7 @@ from langchain_core.tools import BaseTool
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from graph import DiagnosisModel, HypothesesDraft, HypothesisModel, build_graph  # noqa: E402
-from mcp_tools import build_mcp_client, load_tools  # noqa: E402
+from mcp_tools import build_mcp_client, load_tools, load_tools_session  # noqa: E402
 
 HERE = os.path.dirname(__file__)
 FIXTURES_RUNBOOKS = os.path.join(HERE, "fixtures", "runbooks")
@@ -210,3 +210,26 @@ async def test_graph_respects_tool_call_budget(real_tools):
     assert result["tool_call_count"] == 3
     assert model.plain_ainvoke_calls == 1, "should call the model exactly once in the budget-exhausted branch"
     assert result["diagnosis"]["root_cause"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_load_tools_session_reuses_one_subprocess(fake_clickhouse_url):
+    """main.py uses load_tools_session (not load_tools) for real runs specifically to
+    avoid spawning a fresh telemetry-server subprocess per tool call. This exercises
+    that exact code path: one session, multiple sequential tool calls through it."""
+    os.environ["TELEMETRY_SERVER_DIR"] = os.path.join(HERE, "..", "..", "mcp", "telemetry-server")
+    os.environ["RUNBOOKS_DIR"] = FIXTURES_RUNBOOKS
+    os.environ["CLICKHOUSE_URL"] = fake_clickhouse_url
+    os.environ["CLICKHOUSE_USER"] = "default"
+    os.environ["CLICKHOUSE_PASSWORD"] = "x"
+
+    client = build_mcp_client()
+    async with load_tools_session(client) as tools:
+        by_name = {t.name: t for t in tools}
+        r1 = await by_name["list_runbooks"].ainvoke({})
+        r2 = await by_name["read_runbook"].ainvoke({"topic": "kafka lag"})
+        r3 = await by_name["list_metric_names"].ainvoke({"since_minutes": 10})
+
+    assert "kafka-lag" in str(r1)
+    assert "kafka-lag" in str(r2)
+    assert "db.pool.active" in str(r3)

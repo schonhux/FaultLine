@@ -121,6 +121,33 @@ evidence summary) as JSON. Add `--transcript-out path.json` (via `docker compose
 `make test`. They do not, and cannot, verify diagnosis *quality* against the real stack; that's a
 live check against your own running `make up` environment and an `ANTHROPIC_API_KEY`.
 
+**Verified live:** the agent correctly diagnosed `db-pool-exhaustion` -- root cause (a connection
+leak in the buggy deployment), affected service (`checkout`), and the exact triggering deployment
+-- all backed by cited evidence (specific metric buckets, deployment timestamps, log lines, and a
+trace ID), not just a repeated runbook guess.
+
+## Layer 4: evaluation harness
+
+`evaluation/harness.py` runs Layers 2 and 3 together across every scenario (and however many seeds
+you want) and scores the result:
+
+```bash
+export ANTHROPIC_API_KEY=...
+make up
+make eval                 # all 6 scenarios, seed 42
+make eval SEEDS=42,7,101  # multiple seeds per scenario
+```
+
+For each (scenario, seed) it injects the fault via `controlplane`, reads the alert *that run*
+fired straight from Postgres (not "whatever fired most recently" -- the harness is the one thing
+in this repo with Postgres/ground-truth access, since it's the answer key), runs the agent against
+just that alert, and scores the diagnosis three ways: `affected_service` and `triggering_change`
+by direct/token comparison (both are effectively closed-form), and `root_cause` plus
+"unsupported claims" by an LLM judge (`evaluation/scorers/diagnosis_scorer.py`, using a small/cheap
+model) that checks the diagnosis's substance against ground truth and checks every claim in its
+evidence summary against what the transcript actually shows. Results land in
+`evaluation/reports/` as both a JSON report and a self-contained HTML scorecard.
+
 ## Key design decisions
 
 - **Application-level fault injection, not chaos tooling** — every fault is a deterministic,
@@ -139,7 +166,7 @@ live check against your own running `make up` environment and an `ANTHROPIC_API_
 
 ## Status
 
-Under active development. Current phase: Layer 3 (investigation agent).
+Under active development. Current phase: Layer 4 (evaluation harness).
 
 **Closed, with live evidence:**
 - **Layer 0** — instrumented ShopGrid (gateway, checkout, catalog, notifications), Postgres,
@@ -150,13 +177,16 @@ Under active development. Current phase: Layer 3 (investigation agent).
   start-to-finish through `make run-scenario` with zero manual steps, including a self-healing
   hard-restart for the one scenario (`db-pool-exhaustion`) whose fault permanently consumes a
   resource a config reset can't reclaim.
+- **Layer 3** — the LangGraph investigation agent and telemetry MCP server, verified live: given
+  only an alert name/condition (never ground truth), it correctly diagnosed `db-pool-exhaustion`'s
+  root cause, affected service, and triggering deployment, backed by cited evidence.
 
 **In progress:**
-- **Layer 3** — the LangGraph investigation agent and its telemetry MCP server are built and
-  covered by unit/integration tests against a mocked ClickHouse (`make test`). What's *not* yet
-  verified: an actual live run against the real Docker Compose stack with a real
-  `ANTHROPIC_API_KEY`, confirming the agent's diagnosis for `db-pool-exhaustion` matches known
-  ground truth. That live check is the Layer 3 exit criterion and is the next thing to run.
+- **Layer 4** — `evaluation/harness.py` and its scorer are built and covered by unit tests
+  (mocked docker/subprocess calls, canned real log formats, deterministic scoring logic). What's
+  *not* yet verified: an actual `make eval` run across all 6 scenarios against the live stack,
+  confirming the harness's orchestration (controlplane → Postgres → agent → LLM-judge scorer)
+  works end to end and produces a sensible report. That live run is the Layer 4 exit criterion.
 
-**Not started:** Layer 4 (evaluation harness — score the agent across all 6 scenarios × seeds),
-Layer 5 (guarded remediation — Class 1/2 write tools, approval gate), Layer 6 (console/demo).
+**Not started:** Layer 5 (guarded remediation — Class 1/2 write tools, approval gate), Layer 6
+(console/demo).

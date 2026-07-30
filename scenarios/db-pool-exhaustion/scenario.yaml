@@ -30,7 +30,9 @@ expected_symptoms:
   - database CPU remains normal (the DB itself is healthy; the pool is the bottleneck)
 
 symptom_check:
-  query: "SELECT anyLast(Value) FROM otel.otel_metrics_gauge WHERE MetricName='db.pool.active'"
+  query: >-
+    SELECT argMax(Value, TimeUnix) FROM otel.otel_metrics_gauge
+    WHERE MetricName='db.pool.active' AND TimeUnix > toDateTime64('{injected_at}', 3, 'UTC')
   operator: ">="
   threshold: 18.0
   poll_interval_seconds: 5

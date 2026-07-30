@@ -55,16 +55,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def run(args: argparse.Namespace) -> dict:
     model = ChatAnthropic(model=args.model, temperature=0)
     client = build_mcp_client()
-    tools = await load_tools(client)
-    graph = build_graph(model, tools, max_tool_calls=args.max_tool_calls)
 
-    result = await graph.ainvoke(
-        {
-            "alert_name": args.alert_name,
-            "alert_condition": args.alert_condition,
-            "run_id": args.run_id,
-        }
-    )
+    # One telemetry-server subprocess/session for the whole investigation, not one
+    # per tool call -- an investigation can easily make a dozen-plus tool calls, and
+    # each was a real subprocess spawn before this fix.
+    async with load_tools_session(client) as tools:
+        graph = build_graph(model, tools, max_tool_calls=args.max_tool_calls)
+        result = await graph.ainvoke(
+            {
+                "alert_name": args.alert_name,
+                "alert_condition": args.alert_condition,
+                "run_id": args.run_id,
+            }
+        )
 
     if args.transcript_out:
         transcript = {

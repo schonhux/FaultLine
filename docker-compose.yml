@@ -177,6 +177,13 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: faultline_otel
+    # Host mount for --transcript-out: `docker compose run --rm` destroys the
+    # container the instant the process exits, so anything written only inside the
+    # container (e.g. via `docker compose cp` afterwards) is gone before you can
+    # retrieve it. Writing directly into a mounted host directory sidesteps that
+    # race entirely -- this is how evaluation/harness.py collects per-run transcripts.
+    volumes:
+      - ./evaluation/reports:/app/output
     depends_on:
       clickhouse: { condition: service_healthy }
 
