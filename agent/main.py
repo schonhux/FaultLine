@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 
-from graph import DEFAULT_MAX_TOOL_CALLS, build_graph
-from mcp_tools import build_mcp_client, load_tools_session
+from graph import DEFAULT_MAX_REMEDIATION_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS, build_graph
+from mcp_tools import build_mcp_client, load_remediation_tools_session, load_tools_session
 
 DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
@@ -49,25 +49,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--max-tool-calls", type=int, default=DEFAULT_MAX_TOOL_CALLS)
     parser.add_argument("--transcript-out", default=None, help="optional path to write the full run transcript")
+    parser.add_argument(
+        "--enable-remediation",
+        action="store_true",
+        help=(
+            "Layer 5: after diagnosing, let the agent propose a guarded remediation "
+            "action (restart_service or rollback_deployment). Every action still "
+            "requires human approval via evaluation/approve.py -- this flag only "
+            "grants the agent the ability to *propose* one, not to act unilaterally. "
+            "Requires the `remediation` service to be running (`make remediation-up`)."
+        ),
+    )
+    parser.add_argument("--max-remediation-tool-calls", type=int, default=DEFAULT_MAX_REMEDIATION_TOOL_CALLS)
     return parser.parse_args(argv)
 
 
 async def run(args: argparse.Namespace) -> dict:
     model = ChatAnthropic(model=args.model, temperature=0)
-    client = build_mcp_client()
+    client = build_mcp_client(include_remediation=args.enable_remediation)
+
+    initial_state = {
+        "alert_name": args.alert_name,
+        "alert_condition": args.alert_condition,
+        "run_id": args.run_id,
+    }
 
     # One telemetry-server subprocess/session for the whole investigation, not one
     # per tool call -- an investigation can easily make a dozen-plus tool calls, and
     # each was a real subprocess spawn before this fix.
     async with load_tools_session(client) as tools:
-        graph = build_graph(model, tools, max_tool_calls=args.max_tool_calls)
-        result = await graph.ainvoke(
-            {
-                "alert_name": args.alert_name,
-                "alert_condition": args.alert_condition,
-                "run_id": args.run_id,
-            }
-        )
+        if args.enable_remediation:
+            async with load_remediation_tools_session(client) as remediation_tools:
+                graph = build_graph(
+                    model,
+                    tools,
+                    max_tool_calls=args.max_tool_calls,
+                    remediation_tools=remediation_tools,
+                    max_remediation_tool_calls=args.max_remediation_tool_calls,
+                )
+                result = await graph.ainvoke(initial_state)
+        else:
+            graph = build_graph(model, tools, max_tool_calls=args.max_tool_calls)
+            result = await graph.ainvoke(initial_state)
 
     if args.transcript_out:
         transcript = {
@@ -81,11 +104,16 @@ async def run(args: argparse.Namespace) -> dict:
             "tool_call_count": result.get("tool_call_count"),
             "messages": [_message_to_dict(m) for m in result.get("messages", [])],
             "diagnosis": result.get("diagnosis"),
+            "remediation": result.get("remediation"),
         }
         with open(args.transcript_out, "w", encoding="utf-8") as fh:
             json.dump(transcript, fh, indent=2, default=str)
 
-    return result.get("diagnosis") or {}
+    output = result.get("diagnosis") or {}
+    if args.enable_remediation:
+        output = dict(output)
+        output["remediation"] = result.get("remediation")
+    return output
 
 
 def main() -> None:

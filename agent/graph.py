@@ -1,10 +1,11 @@
 """The Layer 3 investigation graph: context collection -> hypothesize -> investigate
-(ReAct loop, budget-limited) -> rank -> END.
+(ReAct loop, budget-limited) -> rank -> END, optionally extended (Layer 5) with a
+remediate phase: propose_* -> execute_remediation -> finalize_remediation -> END.
 
-Layers 4/5 build on top of this rather than replacing it: Layer 4 will invoke this
-graph once per (scenario, seed) run and score the resulting `diagnosis` against that
-run's ground truth; Layer 5 will extend the graph past `rank` with remediation
-proposal / approval / verification nodes.
+Layer 4 invokes this graph once per (scenario, seed) run and scores the resulting
+`diagnosis` against that run's ground truth; it never passes remediation_tools, so the
+graph it gets is exactly the Layer 3 graph, unchanged. Layer 5 passes remediation_tools
+to get the extended graph -- see agent/main.py's --enable-remediation flag.
 
 `build_graph` takes the model and tools as arguments (dependency injection) rather
 than constructing them internally, specifically so tests can supply a fake model and
@@ -17,7 +18,7 @@ import json
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -27,12 +28,15 @@ from prompts import (
     BUDGET_EXHAUSTED_NUDGE,
     HYPOTHESIZE_INSTRUCTION,
     RANK_INSTRUCTION,
+    REMEDIATION_BUDGET_EXHAUSTED_NUDGE,
     SYSTEM_PROMPT,
     render_context_bundle,
+    render_remediate_instruction,
 )
 from state import AgentState
 
 DEFAULT_MAX_TOOL_CALLS = 15
+DEFAULT_MAX_REMEDIATION_TOOL_CALLS = 4
 
 
 class HypothesisModel(BaseModel):
@@ -93,10 +97,45 @@ async def _safe_collect(tools_by_name: dict[str, BaseTool], tool_name: str, args
     return []
 
 
+def _extract_remediation_outcome(messages: list) -> dict:
+    """Scan the remediate-phase messages for the propose_* call the model made (if
+    any) and the terminal status the tools reported, so a Layer 4/5 harness or
+    transcript reader can see the outcome without re-parsing the raw message list."""
+    proposed_tool: str | None = None
+    proposed_target: str | None = None
+    justification: str | None = None
+    last_status: str | None = None
+    detail: str | None = None
+
+    for m in messages:
+        for call in getattr(m, "tool_calls", None) or []:
+            if call.get("name") in ("propose_restart_service", "propose_rollback_deployment"):
+                proposed_tool = call["name"]
+                args = call.get("args", {})
+                proposed_target = args.get("target")
+                justification = args.get("justification")
+        if isinstance(m, ToolMessage):
+            parsed = _parse_tool_json(m.content)
+            if isinstance(parsed, dict) and "status" in parsed:
+                last_status = parsed["status"]
+                detail = parsed.get("reason") or parsed.get("message") or parsed.get("result")
+
+    return {
+        "proposed": proposed_tool is not None,
+        "tool": proposed_tool,
+        "target": proposed_target,
+        "justification": justification,
+        "status": last_status or "none_proposed",
+        "detail": detail,
+    }
+
+
 def build_graph(
     model: BaseChatModel,
     tools: list[BaseTool],
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
+    remediation_tools: list[BaseTool] | None = None,
+    max_remediation_tool_calls: int = DEFAULT_MAX_REMEDIATION_TOOL_CALLS,
 ):
     tools_by_name = {t.name: t for t in tools}
     tool_node = ToolNode(tools)
@@ -205,6 +244,69 @@ def build_graph(
     graph.add_edge("hypothesize", "investigate")
     graph.add_conditional_edges("investigate", route_after_investigate, {"tools": "tools", "rank": "rank"})
     graph.add_edge("tools", "investigate")
-    graph.add_edge("rank", END)
+
+    if remediation_tools:
+        remediation_tool_node = ToolNode(remediation_tools)
+        remediation_model = model.bind_tools(remediation_tools)
+
+        async def remediate(state: AgentState) -> dict:
+            count = state.get("remediation_tool_call_count", 0)
+            messages = state["messages"]
+            first_entry = count == 0
+            if first_entry:
+                instruction = HumanMessage(content=render_remediate_instruction(state.get("run_id")))
+                messages = messages + [instruction]
+
+            if count >= max_remediation_tool_calls:
+                nudge = HumanMessage(content=REMEDIATION_BUDGET_EXHAUSTED_NUDGE)
+                response = await model.ainvoke(messages + [nudge])
+                new_messages = ([instruction] if first_entry else []) + [nudge, response]
+                return {"messages": new_messages}
+
+            response = await remediation_model.ainvoke(messages)
+            new_messages = ([instruction] if first_entry else []) + [response]
+            return {"messages": new_messages}
+
+        async def remediation_tools_node(state: AgentState, config) -> dict:
+            last = state["messages"][-1]
+            n_calls = len(getattr(last, "tool_calls", None) or [])
+            result = await remediation_tool_node.ainvoke(state, config)
+            return {
+                "messages": result["messages"],
+                "remediation_tool_call_count": state.get("remediation_tool_call_count", 0) + n_calls,
+            }
+
+        def route_after_remediate(state: AgentState) -> str:
+            last = state["messages"][-1]
+            tool_calls = getattr(last, "tool_calls", None) or []
+            if tool_calls and state.get("remediation_tool_call_count", 0) < max_remediation_tool_calls:
+                return "remediation_tools"
+            return "finalize_remediation"
+
+        async def finalize_remediation(state: AgentState) -> dict:
+            # remediation_tool_call_count is only ever set by remediation_tools_node,
+            # so if the model never called a tool (e.g. it judged no action was
+            # warranted), the key would otherwise be entirely absent from the final
+            # state rather than reading as 0 -- make it always present once
+            # remediation is enabled for a run.
+            return {
+                "remediation": _extract_remediation_outcome(state["messages"]),
+                "remediation_tool_call_count": state.get("remediation_tool_call_count", 0),
+            }
+
+        graph.add_node("remediate", remediate)
+        graph.add_node("remediation_tools", remediation_tools_node)
+        graph.add_node("finalize_remediation", finalize_remediation)
+
+        graph.add_edge("rank", "remediate")
+        graph.add_conditional_edges(
+            "remediate",
+            route_after_remediate,
+            {"remediation_tools": "remediation_tools", "finalize_remediation": "finalize_remediation"},
+        )
+        graph.add_edge("remediation_tools", "remediate")
+        graph.add_edge("finalize_remediation", END)
+    else:
+        graph.add_edge("rank", END)
 
     return graph.compile()

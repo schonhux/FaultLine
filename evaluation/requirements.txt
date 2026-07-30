@@ -3,3 +3,5 @@ anthropic==0.120.2
 langchain-anthropic==1.5.3
 pydantic==2.13.4
 httpx==0.28.1
+psycopg[binary]==3.2.3
+mcp==1.29.0

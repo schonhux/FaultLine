@@ -187,6 +187,29 @@ services:
     depends_on:
       clickhouse: { condition: service_healthy }
 
+  # ── Layer 5: guarded remediation server ──────────────────────
+  # Holds the Docker socket and application-service/postgres network access the
+  # investigation agent is deliberately denied (see the `agent` service comment
+  # above). The agent only ever reaches this over the network, through two narrow
+  # MCP tools that are policy-checked and require human approval before anything
+  # executes -- see docs/safety-model.md and mcp/remediation-server/policy.py.
+  # Not part of `make up`; start it explicitly with `make remediation-up` before an
+  # agent run with --enable-remediation.
+  remediation:
+    build: { context: ., dockerfile: mcp/remediation-server/Dockerfile }
+    profiles: ["tools"]
+    environment:
+      POSTGRES_DSN: postgres://shopgrid:shopgrid@postgres:5432/shopgrid?sslmode=disable
+      GATEWAY_URL: http://gateway:8080
+      CHECKOUT_URL: http://checkout:8081
+      CATALOG_URL: http://catalog:8082
+      NOTIFICATIONS_URL: http://notifications:8083
+    ports: ["9500:9500"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres: { condition: service_healthy }
+
   # ── Telemetry stack ──────────────────────────────────────────
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1

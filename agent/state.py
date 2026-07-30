@@ -1,10 +1,10 @@
 """Shared state for the investigation graph.
 
-The graph moves through four phases, matching the state machine described in the
-project README: context collection -> hypothesis generation -> investigation ->
-ranking. (Remediation proposal / approval / verification are Layer 5 additions that
-will extend this same graph -- this module intentionally leaves room for that by not
-assuming `diagnosis` is the terminal field of the whole system, just of Layer 3.)
+The graph moves through four Layer 3 phases -- context collection -> hypothesis
+generation -> investigation -> ranking -- optionally followed by a Layer 5 remediate
+phase (propose -> approve -> execute) when build_graph is given remediation_tools.
+`diagnosis` is Layer 3's terminal field; `remediation` is Layer 5's, and is left
+unset entirely when remediation isn't enabled for a run.
 
 Everything here is plain, JSON-serializable data (TypedDicts, not custom classes) so a
 full run's state can be persisted and replayed later, per the "record and replay"
@@ -36,6 +36,22 @@ class Diagnosis(TypedDict):
     hypotheses_considered: list[str]
 
 
+class RemediationOutcome(TypedDict, total=False):
+    """What (if anything) the Layer 5 remediate phase did after diagnosis. `status`
+    mirrors the remediation server's own terminal states: none_proposed (the agent
+    judged no safe action applied), denied (failed a policy check), pending_approval
+    (approved by policy but no human decision arrived -- shouldn't be terminal in
+    practice since execute_remediation blocks for a decision, but included for
+    completeness), approved/denied_by_human/executed/timed_out/execution_failed."""
+
+    proposed: bool
+    tool: str | None
+    target: str | None
+    justification: str | None
+    status: str | None
+    detail: str | None
+
+
 class AgentState(TypedDict, total=False):
     # Inputs, set once at graph invocation -- this is deliberately the *only* thing the
     # agent is told about the incident. It never sees scenario_id, fault_config, or
@@ -61,3 +77,9 @@ class AgentState(TypedDict, total=False):
 
     # Final output of Layer 3 -- what Layer 4 scores against ground_truth.
     diagnosis: Diagnosis | None
+
+    # Layer 5 only: populated when build_graph is given remediation_tools. Mirrors
+    # tool_call_count/messages' role but for the separate remediate <-> remediation_tools
+    # loop, so investigation's own budget/messages are untouched by remediation.
+    remediation_tool_call_count: int
+    remediation: RemediationOutcome | None

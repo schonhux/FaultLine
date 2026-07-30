@@ -1,4 +1,4 @@
-.PHONY: up down build logs smoke demo eval test fmt lint help
+.PHONY: up down build logs smoke demo eval test fmt lint help remediation-up remediation-down approvals run-agent-remediate
 
 up:            ## Start ShopGrid + telemetry stack
 	docker compose up -d --build
@@ -32,9 +32,24 @@ eval:          ## Run + score scenarios end to end: make eval SCENARIOS=redis-la
 	python3 -m pip install -q -r evaluation/requirements.txt
 	python3 evaluation/harness.py --seeds "$(or $(SEEDS),42)" $(if $(SCENARIOS),--scenarios "$(SCENARIOS)")
 
+remediation-up:    ## Layer 5: start the guarded-remediation server (required before --enable-remediation runs)
+	docker compose --profile tools up -d --build remediation
+
+remediation-down:  ## Layer 5: stop the remediation server
+	docker compose stop remediation
+
+approvals:         ## Layer 5: list remediations awaiting human approval
+	python3 -m pip install -q -r evaluation/requirements.txt
+	python3 evaluation/approve.py list
+
+run-agent-remediate: ## Layer 5: run the agent with remediation enabled: make run-agent-remediate ALERT_NAME=... ALERT_CONDITION="..." RUN_ID=...
+	docker compose run --rm agent --alert-name "$(ALERT_NAME)" --alert-condition "$(ALERT_CONDITION)" \
+		--run-id "$(RUN_ID)" --enable-remediation
+
 test:          ## Run Rust and Python tests
 	cargo test --workspace
 	cd mcp/telemetry-server && python3 -m pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
+	cd mcp/remediation-server && python3 -m pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
 	cd agent && python3 -m pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
 	python3 -m pip install -q -r evaluation/requirements-dev.txt && python3 -m pytest evaluation/tests/ -v
 

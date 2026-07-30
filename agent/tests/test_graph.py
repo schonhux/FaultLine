@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -57,18 +57,36 @@ class _ToolsBinding:
         return msg
 
 
+_REMEDIATION_TOOL_NAMES = {"propose_restart_service", "propose_rollback_deployment", "execute_remediation"}
+
+
 class FakeModel:
     """A minimal stand-in for BaseChatModel that only supports what graph.py calls:
     bind_tools, with_structured_output, and a plain ainvoke for the budget-exhausted
-    branch. Not a real LangChain model -- a hand-rolled test double."""
+    branch. Not a real LangChain model -- a hand-rolled test double.
 
-    def __init__(self, tool_call_script: list[AIMessage], hypotheses: HypothesesDraft, diagnosis: DiagnosisModel):
+    bind_tools is called twice in a Layer 5 run (once for investigation tools, once
+    for remediation tools) -- this distinguishes the two calls by tool name so each
+    gets its own scripted response sequence and its own position counter.
+    """
+
+    def __init__(
+        self,
+        tool_call_script: list[AIMessage],
+        hypotheses: HypothesesDraft,
+        diagnosis: DiagnosisModel,
+        remediation_tool_call_script: list[AIMessage] | None = None,
+    ):
         self._tool_call_script = tool_call_script
         self._hypotheses = hypotheses
         self._diagnosis = diagnosis
+        self._remediation_tool_call_script = remediation_tool_call_script
         self.plain_ainvoke_calls = 0
 
     def bind_tools(self, tools):
+        names = {t.name for t in tools}
+        if names & _REMEDIATION_TOOL_NAMES:
+            return _ToolsBinding(self._remediation_tool_call_script)
         return _ToolsBinding(self._tool_call_script)
 
     def with_structured_output(self, schema):
@@ -233,3 +251,167 @@ async def test_load_tools_session_reuses_one_subprocess(fake_clickhouse_url):
     assert "kafka-lag" in str(r1)
     assert "kafka-lag" in str(r2)
     assert "db.pool.active" in str(r3)
+
+
+def _make_fake_remediation_tools(propose_result: dict, execute_result: dict) -> list[BaseTool]:
+    """Stand-ins for the real remediation-server tools (mcp/remediation-server/), so
+    the graph's remediate <-> remediation_tools wiring can be exercised without a real
+    Postgres, Docker, or the remediation container. Returns JSON *strings*, matching
+    how a real MCP tool result actually arrives through langchain_mcp_adapters (a text
+    content block) -- this is what _parse_tool_json is written to unwrap."""
+
+    def _propose_restart_service(target: str, justification: str, run_id: str | None = None) -> str:
+        """Fake stand-in for the real propose_restart_service MCP tool."""
+        return json.dumps(propose_result)
+
+    def _propose_rollback_deployment(target: str, justification: str, run_id: str | None = None) -> str:
+        """Fake stand-in for the real propose_rollback_deployment MCP tool."""
+        return json.dumps(propose_result)
+
+    def _execute_remediation(approval_id: str, timeout_seconds: float = 90.0) -> str:
+        """Fake stand-in for the real execute_remediation MCP tool."""
+        return json.dumps(execute_result)
+
+    return [
+        StructuredTool.from_function(func=_propose_restart_service, name="propose_restart_service"),
+        StructuredTool.from_function(func=_propose_rollback_deployment, name="propose_rollback_deployment"),
+        StructuredTool.from_function(func=_execute_remediation, name="execute_remediation"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remediate_phase_proposes_and_executes_an_action(real_tools):
+    hypotheses = HypothesesDraft(hypotheses=[HypothesisModel(statement="X", affected_service="checkout", confidence=0.9)])
+    diagnosis = DiagnosisModel(
+        root_cause="connection leak",
+        affected_service="checkout",
+        triggering_change="v1.8.3-buggy",
+        confidence=0.95,
+        evidence_summary="Pool pinned at max right after deployment.",
+        hypotheses_considered=["X"],
+    )
+    investigate_script = [_final_text_message()]
+    remediation_script = [
+        _tool_call_message(
+            "propose_restart_service",
+            {"target": "checkout", "justification": "pool pinned at 20/20 since deploy", "run_id": "run-1"},
+            "rem_call_1",
+        ),
+        _tool_call_message("execute_remediation", {"approval_id": "approval-abc"}, "rem_call_2"),
+        _final_text_message(),
+    ]
+    model = FakeModel(
+        tool_call_script=investigate_script,
+        hypotheses=hypotheses,
+        diagnosis=diagnosis,
+        remediation_tool_call_script=remediation_script,
+    )
+    remediation_tools = _make_fake_remediation_tools(
+        propose_result={"status": "pending_approval", "approval_id": "approval-abc", "risk_class": 1},
+        execute_result={"status": "executed", "result": "restarted faultline-checkout-1"},
+    )
+
+    graph = build_graph(model, real_tools, max_tool_calls=15, remediation_tools=remediation_tools)
+    result = await graph.ainvoke(
+        {"alert_name": "checkout-pool-exhausted", "alert_condition": "db.pool.active >= 18", "run_id": "run-1"}
+    )
+
+    assert result["diagnosis"]["root_cause"] == "connection leak"
+    assert result["remediation"]["proposed"] is True
+    assert result["remediation"]["tool"] == "propose_restart_service"
+    assert result["remediation"]["target"] == "checkout"
+    assert result["remediation"]["status"] == "executed"
+    assert result["remediation_tool_call_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_remediate_phase_records_no_action_when_model_proposes_nothing(real_tools):
+    hypotheses = HypothesesDraft(hypotheses=[HypothesisModel(statement="X", affected_service=None, confidence=0.4)])
+    diagnosis = DiagnosisModel(
+        root_cause="unclear",
+        affected_service="gateway",
+        triggering_change=None,
+        confidence=0.3,
+        evidence_summary="Not confident enough to act.",
+        hypotheses_considered=["X"],
+    )
+    investigate_script = [_final_text_message()]
+    # The model decides no remediation is warranted -- plain text, no tool call.
+    remediation_script = [AIMessage(content="I'm not confident enough to propose an action here.")]
+    model = FakeModel(
+        tool_call_script=investigate_script,
+        hypotheses=hypotheses,
+        diagnosis=diagnosis,
+        remediation_tool_call_script=remediation_script,
+    )
+    remediation_tools = _make_fake_remediation_tools(propose_result={}, execute_result={})
+
+    graph = build_graph(model, real_tools, max_tool_calls=15, remediation_tools=remediation_tools)
+    result = await graph.ainvoke(
+        {"alert_name": "test-alert", "alert_condition": "test-condition", "run_id": "run-2"}
+    )
+
+    assert result["remediation"]["proposed"] is False
+    assert result["remediation"]["status"] == "none_proposed"
+    assert result["remediation_tool_call_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_remediate_phase_respects_its_own_tool_call_budget(real_tools):
+    hypotheses = HypothesesDraft(hypotheses=[HypothesisModel(statement="X", affected_service="checkout", confidence=0.9)])
+    diagnosis = DiagnosisModel(
+        root_cause="connection leak",
+        affected_service="checkout",
+        triggering_change="v1.8.3-buggy",
+        confidence=0.95,
+        evidence_summary="Pool pinned at max.",
+        hypotheses_considered=["X"],
+    )
+    investigate_script = [_final_text_message()]
+    # Script always wants to keep calling execute_remediation -- the graph must cut
+    # it off at max_remediation_tool_calls rather than looping forever, exactly like
+    # the investigate/tools budget test above.
+    remediation_script = [
+        _tool_call_message("execute_remediation", {"approval_id": "approval-abc"}, f"rem_call_{i}") for i in range(50)
+    ]
+    model = FakeModel(
+        tool_call_script=investigate_script,
+        hypotheses=hypotheses,
+        diagnosis=diagnosis,
+        remediation_tool_call_script=remediation_script,
+    )
+    remediation_tools = _make_fake_remediation_tools(
+        propose_result={"status": "pending_approval"},
+        execute_result={"status": "timed_out", "reason": "no approval decision within 90s"},
+    )
+
+    graph = build_graph(
+        model, real_tools, max_tool_calls=15, remediation_tools=remediation_tools, max_remediation_tool_calls=2
+    )
+    result = await graph.ainvoke(
+        {"alert_name": "test-alert", "alert_condition": "test-condition", "run_id": "run-3"}
+    )
+
+    assert result["remediation_tool_call_count"] == 2
+    assert result["remediation"]["status"] == "timed_out"
+
+
+def test_build_graph_without_remediation_tools_is_unchanged(real_tools):
+    """Regression guard: passing no remediation_tools (the Layer 3/4 default) must
+    produce a graph with no remediate/remediation_tools/finalize_remediation nodes at
+    all, so every existing Layer 3/4 caller is provably unaffected by Layer 5."""
+    hypotheses = HypothesesDraft(hypotheses=[HypothesisModel(statement="X", affected_service=None, confidence=0.5)])
+    diagnosis = DiagnosisModel(
+        root_cause="unknown",
+        affected_service="catalog",
+        triggering_change=None,
+        confidence=0.3,
+        evidence_summary="n/a",
+        hypotheses_considered=["X"],
+    )
+    model = FakeModel(tool_call_script=[_final_text_message()], hypotheses=hypotheses, diagnosis=diagnosis)
+    graph = build_graph(model, real_tools, max_tool_calls=15)
+    node_names = set(graph.get_graph().nodes.keys())
+    assert "remediate" not in node_names
+    assert "remediation_tools" not in node_names
+    assert "finalize_remediation" not in node_names

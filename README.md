@@ -148,6 +148,50 @@ model) that checks the diagnosis's substance against ground truth and checks eve
 evidence summary against what the transcript actually shows. Results land in
 `evaluation/reports/` as both a JSON report and a self-contained HTML scorecard.
 
+## Layer 5: guarded remediation
+
+`mcp/remediation-server/` is a second MCP server, deliberately its own container (not bundled
+into the agent image the way the telemetry server is): it holds the Docker socket and
+application-service network access the investigation agent is denied everywhere else in this
+project. The agent only ever reaches it over the network, through exactly two tools:
+
+- `propose_restart_service(target, justification, run_id)` — Class 1 (low-risk)
+- `propose_rollback_deployment(target, justification, run_id)` — Class 2 (consequential)
+
+Both go through a server-side policy engine (`policy.py`) before anything is recorded: the
+target must be an application service (`gateway`/`checkout`/`catalog`/`notifications` —
+infrastructure is never a valid target, which is how "Class 3 actions are never exposed" is
+actually enforced), the justification must cite real evidence, and at most one remediation is
+allowed per investigation. If policy passes, the proposal is written to Postgres
+(`remediations` table) as `pending_approval` — nothing has happened yet. A human then runs
+`python3 evaluation/approve.py list` / `approve <id>` / `deny <id>` in another terminal, and a
+third tool, `execute_remediation(approval_id)`, polls (bounded, default 90s) for that decision
+and only then performs the real action (`docker restart`, or `POST /internal/fault/reset` for
+a rollback). No decision within the timeout means no action — the safe default.
+
+This is wired into the agent as a new `remediate` phase after `rank`, present only when
+`build_graph` is given `remediation_tools` — Layer 3/4 runs never pass that, so their graph is
+byte-for-byte the original Layer 3 graph. To run it:
+
+```bash
+make up
+make remediation-up
+make run-scenario SCENARIO=db-pool-exhaustion SEED=42
+make run-agent-remediate ALERT_NAME="..." ALERT_CONDITION="..." RUN_ID="..."
+# in another terminal, once the agent proposes an action:
+make approvals
+python3 evaluation/approve.py approve <id>
+```
+
+`mcp/remediation-server/tests/` covers the policy engine, the Docker/HTTP action wrappers
+(mocked), and the full propose → approve → execute flow (mocked Postgres) — 20 tests, all
+passing. `agent/tests/test_graph.py` covers the new `remediate` phase's routing and budget, plus
+a regression test proving the graph is unchanged when `remediation_tools` isn't passed. What
+none of this can verify without your running Docker Compose stack, Postgres, and a live
+`ANTHROPIC_API_KEY`: that the agent actually proposes a sensible action against a real scenario,
+that a real human approval unblocks `execute_remediation`, and that the restarted/rolled-back
+service actually recovers. That live run is the Layer 5 exit criterion.
+
 ## Key design decisions
 
 - **Application-level fault injection, not chaos tooling** — every fault is a deterministic,
@@ -166,7 +210,7 @@ evidence summary against what the transcript actually shows. Results land in
 
 ## Status
 
-Under active development. Current phase: Layer 4 (evaluation harness).
+Under active development. Current phase: Layer 5 (guarded remediation).
 
 **Closed, with live evidence:**
 - **Layer 0** — instrumented ShopGrid (gateway, checkout, catalog, notifications), Postgres,
@@ -180,13 +224,19 @@ Under active development. Current phase: Layer 4 (evaluation harness).
 - **Layer 3** — the LangGraph investigation agent and telemetry MCP server, verified live: given
   only an alert name/condition (never ground truth), it correctly diagnosed `db-pool-exhaustion`'s
   root cause, affected service, and triggering deployment, backed by cited evidence.
+- **Layer 4** — `make eval` run live across all 6 scenarios: 6/6 ran end to end with no harness
+  failures, no cross-scenario contamination (verified by inspecting every diagnosis individually),
+  4/6 correct root cause, 5/6 correct affected service, 6/6 correct triggering change. The two
+  misses are genuine agent diagnostic nuance (confirmed via the judge's own rationale), not
+  harness bugs.
 
 **In progress:**
-- **Layer 4** — `evaluation/harness.py` and its scorer are built and covered by unit tests
-  (mocked docker/subprocess calls, canned real log formats, deterministic scoring logic). What's
-  *not* yet verified: an actual `make eval` run across all 6 scenarios against the live stack,
-  confirming the harness's orchestration (controlplane → Postgres → agent → LLM-judge scorer)
-  works end to end and produces a sensible report. That live run is the Layer 4 exit criterion.
+- **Layer 5** — the remediation server, policy engine, approval gate, and the agent's new
+  `remediate` phase are built and covered by unit tests (20 passing in
+  `mcp/remediation-server/tests/`, 4 new passing in `agent/tests/test_graph.py`, all mocked —
+  no real Postgres/Docker/Claude call in any of them). What's *not* yet verified: a live run
+  against the real Docker Compose stack proving the agent proposes a sensible action, a human
+  approval via `evaluation/approve.py` actually unblocks execution, and the targeted service
+  recovers. That live run is the Layer 5 exit criterion.
 
-**Not started:** Layer 5 (guarded remediation — Class 1/2 write tools, approval gate), Layer 6
-(console/demo).
+**Not started:** Layer 6 (console/demo).
