@@ -159,6 +159,27 @@ services:
       clickhouse: { condition: service_healthy }
       otel-collector: { condition: service_started }
 
+  # ── Layer 3: investigation agent (one-shot CLI, not a long-running service) ──
+  # Excluded from `make up` via the "tools" profile; invoke explicitly with
+  # `docker compose run --rm agent --alert-name ... --alert-condition ...`, or
+  # `make run-agent ALERT_NAME=... ALERT_CONDITION=...`.
+  #
+  # Deliberately has NO access to postgres, gateway, checkout, catalog, or
+  # notifications, and no docker socket -- it can reach ClickHouse's read-only
+  # telemetry tables (via its own bundled MCP server) and nothing else. It never sees
+  # fault_config or a run's ground_truth; those live only in Postgres, which this
+  # container has no credentials for and no network route requirement to reach.
+  agent:
+    build: { context: ., dockerfile: agent/Dockerfile }
+    profiles: ["tools"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in your shell or a .env file}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: faultline_otel
+    depends_on:
+      clickhouse: { condition: service_healthy }
+
   # ── Telemetry stack ──────────────────────────────────────────
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1

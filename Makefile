@@ -18,15 +18,23 @@ smoke:         ## Hit the gateway once through the public API
 run-scenario:  ## Run a scenario end to end: make run-scenario SCENARIO=db-pool-exhaustion SEED=42
 	docker compose run --rm controlplane run $(SCENARIO) --seed $(SEED)
 
-demo:          ## Run the db-pool-exhaustion scenario end to end
-	python -m agent.run --scenario scenarios/db-pool-exhaustion/scenario.yaml
+run-agent:     ## Run the Layer 3 agent against an alert: make run-agent ALERT_NAME=... ALERT_CONDITION="..."
+	docker compose run --rm agent --alert-name "$(ALERT_NAME)" --alert-condition "$(ALERT_CONDITION)"
 
-eval:          ## Score all recorded runs
+demo:          ## Run db-pool-exhaustion, then print the alert it fired so you can feed it to run-agent
+	docker compose run --rm controlplane run db-pool-exhaustion --seed 42
+	@echo "--- alert fired by the run above (name | condition) ---"
+	@docker compose exec -T postgres psql -U shopgrid -d shopgrid -t -A -F' | ' \
+		-c "SELECT name, condition FROM alerts ORDER BY fired_at DESC LIMIT 1;"
+	@echo "--- now run: make run-agent ALERT_NAME=\"<name above>\" ALERT_CONDITION=\"<condition above>\" ---"
+
+eval:          ## Score all recorded runs (Layer 4 -- not built yet)
 	python -m evaluation.scorers.run_all
 
 test:          ## Run Rust and Python tests
 	cargo test --workspace
-	python -m pytest tests/
+	cd mcp/telemetry-server && pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
+	cd agent && pip install -q -r requirements-dev.txt && python3 -m pytest tests/ -v
 
 fmt:           ## Format Rust workspace
 	cargo fmt --all
